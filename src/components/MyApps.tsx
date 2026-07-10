@@ -44,7 +44,7 @@ const APPS: PortalApp[] = [
     label: "Mes Outils",
     description: "Portail interne : accès aux applications, espace partage et réservations.",
     logoSrc: "/mesoutils-light.png",
-    href: env.VITE_MESOUTILS_URL ?? "https://mesoutils.eco-solidaire.fr",
+    href: env.VITE_MESOUTILS_URL ?? "https://mesoutils.groupemes.fr",
     cardBg: "#e6f6ec",
   },
   {
@@ -84,7 +84,7 @@ const APPS: PortalApp[] = [
     label: "Pointeuse",
     description: "Suivi des salariés et des chantiers : pointages, projets, dépenses et factures.",
     logoSrc: "/logo-lsdb.png",
-    href: env.VITE_POINTEUSE_URL ?? "https://pointeuselsdb.vercel.app",
+    href: env.VITE_POINTEUSE_URL ?? "https://pointeuse.groupemes.fr",
     cardBg: "#fff1e5",
   },
 ];

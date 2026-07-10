@@ -1,5 +1,6 @@
-import { mutation, query } from "./_generated/server";
+import { action, mutation, query } from "./_generated/server";
 import { v } from "convex/values";
+import { api } from "./_generated/api";
 import type { Doc } from "./_generated/dataModel";
 import { requireAdmin, requireStaff } from "./lib";
 
@@ -16,6 +17,81 @@ import { requireAdmin, requireStaff } from "./lib";
  */
 
 const DEFAULT_TRAVEL_RATE_PER_KM = 1; // 1 € / km
+const LSDB_BASE_ADDRESS = "4 rue de la Prairie, 60650 Lachapelle-aux-Pots";
+
+const documentKind = v.union(
+  v.literal("chantier_photo"),
+  v.literal("expense_quote"),
+  v.literal("expense_delivery_note"),
+  v.literal("expense_invoice"),
+  v.literal("invoice_pdf"),
+  v.literal("other"),
+);
+
+function buildAddressString(args: {
+  address: string;
+  postalCode?: string;
+  city?: string;
+}) {
+  return [args.address, args.postalCode, args.city]
+    .map((part) => part?.trim())
+    .filter(Boolean)
+    .join(" ");
+}
+
+async function geocodeAddress(
+  query: string,
+  accessToken: string,
+): Promise<{ lon: number; lat: number }> {
+  const url = new URL(
+    `https://api.mapbox.com/geocoding/v5/mapbox.places/${encodeURIComponent(query)}.json`,
+  );
+  url.searchParams.set("limit", "1");
+  url.searchParams.set("language", "fr");
+  url.searchParams.set("country", "fr");
+  url.searchParams.set("access_token", accessToken);
+  const response = await fetch(url.toString());
+  const payload = (await response.json()) as {
+    features?: Array<{ center?: [number, number] }>;
+    message?: string;
+  };
+  if (!response.ok) {
+    throw new Error(payload.message || "Géocodage Mapbox impossible.");
+  }
+  const center = payload.features?.[0]?.center;
+  if (!center) {
+    throw new Error("Adresse introuvable.");
+  }
+  return { lon: center[0], lat: center[1] };
+}
+
+async function drivingDistanceKm(
+  from: { lon: number; lat: number },
+  to: { lon: number; lat: number },
+  accessToken: string,
+) {
+  const coordinates = `${from.lon},${from.lat};${to.lon},${to.lat}`;
+  const url = new URL(
+    `https://api.mapbox.com/directions/v5/mapbox/driving/${coordinates}`,
+  );
+  url.searchParams.set("alternatives", "false");
+  url.searchParams.set("geometries", "geojson");
+  url.searchParams.set("overview", "false");
+  url.searchParams.set("access_token", accessToken);
+  const response = await fetch(url.toString());
+  const payload = (await response.json()) as {
+    routes?: Array<{ distance?: number }>;
+    message?: string;
+  };
+  if (!response.ok) {
+    throw new Error(payload.message || "Calcul d'itinéraire Mapbox impossible.");
+  }
+  const meters = payload.routes?.[0]?.distance;
+  if (typeof meters !== "number") {
+    throw new Error("Distance routière introuvable.");
+  }
+  return meters / 1000;
+}
 
 /* ─── Salariés ────────────────────────────────────────────────────────────── */
 
@@ -245,7 +321,7 @@ export const projectSummary = query({
     if (!project) return null;
     const client = await ctx.db.get(project.clientId);
 
-    const [entries, expenses, invoices, documents] = await Promise.all([
+    const [entries, expenses, invoices, documents, employees, suppliers] = await Promise.all([
       ctx.db
         .query("ptTimeEntries")
         .withIndex("by_project", (q) => q.eq("projectId", projectId))
@@ -266,7 +342,28 @@ export const projectSummary = query({
         .withIndex("by_project", (q) => q.eq("projectId", projectId))
         .order("desc")
         .collect(),
+      ctx.db.query("ptEmployees").collect(),
+      ctx.db.query("ptSuppliers").collect(),
     ]);
+
+    const employeeNameById = new Map(
+      employees.map((employee) => [employee._id, `${employee.firstName} ${employee.lastName}`]),
+    );
+    const supplierNameById = new Map(suppliers.map((supplier) => [supplier._id, supplier.name]));
+
+    const enrichedEntries = entries.map((entry) => ({
+      ...entry,
+      lines: entry.lines.map((line) => ({
+        ...line,
+        employeeName: employeeNameById.get(line.employeeId) ?? "—",
+      })),
+    }));
+    const enrichedExpenses = expenses.map((expense) => ({
+      ...expense,
+      supplierName: expense.supplierId
+        ? supplierNameById.get(expense.supplierId) ?? "—"
+        : null,
+    }));
 
     const laborCost = entries.reduce((s, e) => s + e.laborCost, 0);
     const travelCost = entries.reduce((s, e) => s + e.travelCost, 0);
@@ -291,8 +388,9 @@ export const projectSummary = query({
         clientName: client?.name ?? "—",
         travelRatePerKm: project.travelRatePerKm ?? DEFAULT_TRAVEL_RATE_PER_KM,
       },
-      entries,
-      expenses,
+      client,
+      entries: enrichedEntries,
+      expenses: enrichedExpenses,
       invoices,
       documents: docsWithUrl,
       totals: {
@@ -639,6 +737,7 @@ export const registerDocument = mutation({
     storageId: v.id("_storage"),
     name: v.string(),
     mimeType: v.optional(v.string()),
+    kind: v.optional(documentKind),
     projectId: v.id("ptProjects"),
   },
   handler: async (ctx, args) => {
@@ -647,6 +746,7 @@ export const registerDocument = mutation({
       storageId: args.storageId,
       name: args.name,
       mimeType: args.mimeType,
+      kind: args.kind,
       projectId: args.projectId,
       uploadedAt: Date.now(),
       uploadedBy: identity.email ?? undefined,
@@ -691,6 +791,35 @@ export const dashboard = query({
       pending: round2(invoiced - paid),
       recentEntries: entries.slice(0, 5),
     };
+  },
+});
+
+export const computeProjectDistance = action({
+  args: {
+    address: v.string(),
+    postalCode: v.optional(v.string()),
+    city: v.optional(v.string()),
+  },
+  handler: async (ctx, args): Promise<{ distanceKm: number }> => {
+    const access = await ctx.runQuery(api.permissions.myAccess, {});
+    if (!access.isStaff && !access.isAdmin && !access.bootstrapMode) {
+      throw new Error("Accès réservé au personnel.");
+    }
+    const accessToken = process.env.MAPBOX_ACCESS_TOKEN;
+    if (!accessToken) {
+      throw new Error("MAPBOX_ACCESS_TOKEN n'est pas configurée côté Convex.");
+    }
+    const destination = buildAddressString(args);
+    if (!destination) {
+      throw new Error("Adresse du chantier manquante.");
+    }
+
+    const [base, target] = await Promise.all([
+      geocodeAddress(LSDB_BASE_ADDRESS, accessToken),
+      geocodeAddress(destination, accessToken),
+    ]);
+    const distanceKm = await drivingDistanceKm(base, target, accessToken);
+    return { distanceKm: Math.round(distanceKm * 10) / 10 };
   },
 });
 

@@ -15,7 +15,9 @@ const clerkKey = import.meta.env.VITE_CLERK_PUBLISHABLE_KEY;
 const root = createRoot(document.getElementById("root")!);
 const missing: string[] = [];
 if (!convexUrl) missing.push("VITE_CONVEX_URL");
-if (!clerkKey) missing.push("VITE_CLERK_PUBLISHABLE_KEY");
+if (!clerkKey || clerkKey.includes("REMPLACER")) {
+  missing.push("VITE_CLERK_PUBLISHABLE_KEY");
+}
 
 if (missing.length > 0) {
   root.render(

@@ -1558,6 +1558,16 @@ export default defineSchema(
     storageId: v.id("_storage"),
     name: v.string(),
     mimeType: v.optional(v.string()),
+    kind: v.optional(
+      v.union(
+        v.literal("chantier_photo"),
+        v.literal("expense_quote"),
+        v.literal("expense_delivery_note"),
+        v.literal("expense_invoice"),
+        v.literal("invoice_pdf"),
+        v.literal("other"),
+      ),
+    ),
     projectId: v.id("ptProjects"),
     timeEntryId: v.optional(v.id("ptTimeEntries")),
     expenseId: v.optional(v.id("ptExpenses")),
