@@ -1473,6 +1473,10 @@ export default defineSchema(
     /** Dénormalisé depuis le projet au moment du pointage. */
     clientId: v.id("ptClients"),
     date: v.number(),
+    billingStatus: v.union(
+      v.literal("a_facturer"),
+      v.literal("facture"),
+    ),
     lines: v.array(
       v.object({
         employeeId: v.id("ptEmployees"),

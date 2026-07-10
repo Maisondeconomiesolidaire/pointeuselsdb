@@ -28,6 +28,11 @@ const documentKind = v.union(
   v.literal("other"),
 );
 
+const timeEntryBillingStatus = v.union(
+  v.literal("a_facturer"),
+  v.literal("facture"),
+);
+
 function buildAddressString(args: {
   address: string;
   postalCode?: string;
@@ -489,6 +494,7 @@ export const listTimeEntries = query({
       ...e,
       projectName: projectName.get(e.projectId) ?? "—",
       clientName: clientName.get(e.clientId) ?? "—",
+      billingStatus: e.billingStatus ?? "a_facturer",
       lines: e.lines.map((l) => ({
         ...l,
         employeeName: empName.get(l.employeeId) ?? "—",
@@ -553,6 +559,7 @@ export const createTimeEntry = mutation({
       projectId: args.projectId,
       clientId: project.clientId,
       date: args.date,
+      billingStatus: "a_facturer",
       lines,
       travel,
       laborCost,
@@ -569,6 +576,60 @@ export const createTimeEntry = mutation({
       await ctx.db.patch(docId, { timeEntryId: entryId });
     }
     return entryId;
+  },
+});
+
+export const getTimeEntry = query({
+  args: { entryId: v.id("ptTimeEntries") },
+  handler: async (ctx, { entryId }) => {
+    await requireStaff(ctx);
+    const entry = await ctx.db.get(entryId);
+    if (!entry) return null;
+
+    const [project, client, employees, documents] = await Promise.all([
+      ctx.db.get(entry.projectId),
+      ctx.db.get(entry.clientId),
+      ctx.db.query("ptEmployees").collect(),
+      Promise.all(
+        entry.documentIds.map(async (documentId) => {
+          const document = await ctx.db.get(documentId);
+          if (!document) return null;
+          return {
+            ...document,
+            url: await ctx.storage.getUrl(document.storageId),
+          };
+        }),
+      ),
+    ]);
+
+    const employeeNameById = new Map(
+      employees.map((employee) => [employee._id, `${employee.firstName} ${employee.lastName}`]),
+    );
+
+    return {
+      ...entry,
+      billingStatus: entry.billingStatus ?? "a_facturer",
+      projectName: project?.name ?? "—",
+      clientName: client?.name ?? "—",
+      project,
+      client,
+      lines: entry.lines.map((line) => ({
+        ...line,
+        employeeName: employeeNameById.get(line.employeeId) ?? "—",
+      })),
+      documents: documents.filter((document): document is NonNullable<typeof document> => Boolean(document)),
+    };
+  },
+});
+
+export const updateTimeEntryBillingStatus = mutation({
+  args: {
+    entryId: v.id("ptTimeEntries"),
+    billingStatus: timeEntryBillingStatus,
+  },
+  handler: async (ctx, { entryId, billingStatus }) => {
+    await requireStaff(ctx);
+    await ctx.db.patch(entryId, { billingStatus });
   },
 });
 
@@ -1180,6 +1241,7 @@ export const adminImportLegacyPointeuse = mutation({
         projectId: project._id,
         clientId: project.clientId,
         date,
+        billingStatus: existing?.billingStatus ?? "a_facturer",
         lines,
         travel,
         laborCost,
