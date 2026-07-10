@@ -208,7 +208,7 @@ function PointageForm({ onClose }: { onClose: () => void }) {
       title="Nouveau pointage"
       className="sm:h-auto sm:max-w-2xl"
     >
-      <div className="mb-5 grid grid-cols-2 gap-2 text-sm">
+      <div className="mb-5 grid gap-2 text-sm sm:grid-cols-2">
         <div
           className={cn(
             "rounded-lg border px-3 py-2",
@@ -250,7 +250,7 @@ function PointageForm({ onClose }: { onClose: () => void }) {
           ) : null}
 
           <Field label="Déplacement réalisé" required>
-            <div className="grid grid-cols-2 gap-2">
+            <div className="grid gap-2 sm:grid-cols-2">
               <button
                 type="button"
                 onClick={() => {

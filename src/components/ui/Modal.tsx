@@ -33,18 +33,21 @@ export function Modal({
   if (!open) return null;
 
   return createPortal(
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/45 p-2 sm:p-6">
+    <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/45 p-0 sm:items-center sm:p-6">
       <div className="absolute inset-0" onClick={onClose} aria-hidden="true" />
       <div
         className={cn(
-          // Plein écran sur mobile, panneau centré 80vw × 80vh à partir de sm.
-          "relative z-10 flex h-full w-full flex-col overflow-hidden rounded-2xl border border-[var(--border)] bg-[var(--card)] shadow-[var(--shadow-strong)]",
-          "sm:h-[80vh] sm:w-[80vw] sm:max-w-[80vw]",
+          // Feuille mobile ancrée en bas, panneau centré à partir de sm.
+          "relative z-10 flex w-full flex-col overflow-hidden border border-[var(--border)] bg-[var(--card)] shadow-[var(--shadow-strong)]",
+          "max-h-[100dvh] min-h-0 rounded-t-3xl border-b-0",
+          "sm:max-h-[80vh] sm:h-[80vh] sm:w-[80vw] sm:max-w-[80vw] sm:rounded-2xl sm:border",
           className,
         )}
       >
-        <div className="flex shrink-0 items-center justify-between gap-3 border-b border-[var(--border)] px-4 py-3.5 sm:px-5 sm:py-4">
-          <h2 className="truncate text-lg font-semibold text-[var(--foreground)]">{title}</h2>
+        <div className="flex shrink-0 items-center justify-between gap-3 border-b border-[var(--border)] px-4 pb-3 pt-[max(1rem,env(safe-area-inset-top))] sm:px-5 sm:py-4">
+          <h2 className="min-w-0 text-base font-semibold text-[var(--foreground)] sm:truncate sm:text-lg">
+            {title}
+          </h2>
           <button
             type="button"
             onClick={onClose}
@@ -54,7 +57,9 @@ export function Modal({
             <X className="h-4 w-4" />
           </button>
         </div>
-        <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden p-4 sm:p-5">{children}</div>
+        <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden px-4 pb-[max(1rem,env(safe-area-inset-bottom))] pt-4 sm:p-5">
+          {children}
+        </div>
       </div>
     </div>,
     document.body,

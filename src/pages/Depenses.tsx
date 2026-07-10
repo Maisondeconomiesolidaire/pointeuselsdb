@@ -154,7 +154,7 @@ function ExpenseForm({ onClose }: { onClose: () => void }) {
       className="sm:h-auto sm:max-w-lg"
     >
       <div className="space-y-4">
-        <div className="grid grid-cols-2 gap-3">
+        <div className="grid gap-3 sm:grid-cols-2">
           <Field label="Projet" required>
             <AppSelect value={projectId} onChange={setProjectId} options={projectOptions} />
           </Field>
@@ -162,7 +162,7 @@ function ExpenseForm({ onClose }: { onClose: () => void }) {
             <AppSelect value={supplierId} onChange={setSupplierId} options={supplierOptions} />
           </Field>
         </div>
-        <div className="grid grid-cols-2 gap-3">
+        <div className="grid gap-3 sm:grid-cols-2">
           <Field label="Dépense" required>
             <Input
               value={label}
@@ -174,7 +174,7 @@ function ExpenseForm({ onClose }: { onClose: () => void }) {
             <DatePicker value={date} onChange={setDate} />
           </Field>
         </div>
-        <div className="grid grid-cols-2 gap-3">
+        <div className="grid gap-3 sm:grid-cols-2">
           <Field label="Montant (€)" required>
             <Input
               type="number"
@@ -221,7 +221,7 @@ function ExpenseForm({ onClose }: { onClose: () => void }) {
           />
         </Field>
 
-        <div className="flex justify-end gap-2 pt-2">
+        <div className="flex flex-col-reverse gap-2 pt-2 sm:flex-row sm:justify-end">
           <Button variant="secondary" onClick={onClose}>
             Annuler
           </Button>

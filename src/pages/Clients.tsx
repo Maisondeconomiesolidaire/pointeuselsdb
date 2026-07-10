@@ -166,7 +166,7 @@ function ClientForm({
         <Field label="Nom / raison sociale" required>
           <Input value={name} onChange={(e) => setName(e.target.value)} />
         </Field>
-        <div className="grid grid-cols-2 gap-3">
+        <div className="grid gap-3 sm:grid-cols-2">
           <Field label="Contact">
             <Input
               value={contactName}
@@ -195,7 +195,7 @@ function ClientForm({
             }}
           />
         </Field>
-        <div className="grid grid-cols-2 gap-3">
+        <div className="grid gap-3 sm:grid-cols-2">
           <Field label="Code postal">
             <Input
               value={postalCode}
@@ -212,7 +212,7 @@ function ClientForm({
 
         {error ? <p className="text-sm text-red-600">{error}</p> : null}
 
-        <div className="flex items-center justify-between pt-2">
+        <div className="flex flex-col gap-3 pt-2 sm:flex-row sm:items-center sm:justify-between">
           {client ? (
             <Button variant="danger" size="sm" onClick={onDelete}>
               <Trash2 className="h-4 w-4" /> Supprimer
@@ -220,7 +220,7 @@ function ClientForm({
           ) : (
             <span />
           )}
-          <div className="flex gap-2">
+          <div className="flex flex-col-reverse gap-2 sm:flex-row">
             <Button variant="secondary" onClick={onClose}>
               Annuler
             </Button>

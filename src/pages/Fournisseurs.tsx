@@ -156,7 +156,7 @@ function SupplierForm({
         <Field label="Type">
           <Input value={supplierType} onChange={(e) => setSupplierType(e.target.value)} />
         </Field>
-        <div className="grid grid-cols-2 gap-3">
+        <div className="grid gap-3 sm:grid-cols-2">
           <Field label="Contact">
             <Input
               value={contactName}
@@ -181,7 +181,7 @@ function SupplierForm({
           <Textarea value={notes} onChange={(e) => setNotes(e.target.value)} />
         </Field>
 
-        <div className="flex items-center justify-between pt-2">
+        <div className="flex flex-col gap-3 pt-2 sm:flex-row sm:items-center sm:justify-between">
           {supplier ? (
             <Button variant="danger" size="sm" onClick={onDelete}>
               <Trash2 className="h-4 w-4" /> Supprimer
@@ -189,7 +189,7 @@ function SupplierForm({
           ) : (
             <span />
           )}
-          <div className="flex gap-2">
+          <div className="flex flex-col-reverse gap-2 sm:flex-row">
             <Button variant="secondary" onClick={onClose}>
               Annuler
             </Button>

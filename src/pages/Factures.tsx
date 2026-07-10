@@ -189,7 +189,7 @@ function InvoiceForm({ onClose }: { onClose: () => void }) {
         <Field label="Projet" required>
           <AppSelect value={projectId} onChange={setProjectId} options={projectOptions} />
         </Field>
-        <div className="grid grid-cols-2 gap-3">
+        <div className="grid gap-3 sm:grid-cols-2">
           <Field label="Numéro" required>
             <Input value={number} onChange={(e) => setNumber(e.target.value)} />
           </Field>
@@ -203,7 +203,7 @@ function InvoiceForm({ onClose }: { onClose: () => void }) {
             />
           </Field>
         </div>
-        <div className="grid grid-cols-2 gap-3">
+        <div className="grid gap-3 sm:grid-cols-2">
           <Field label="Date d'émission" required>
             <DatePicker value={issuedAt} onChange={setIssuedAt} />
           </Field>
@@ -231,7 +231,7 @@ function InvoiceForm({ onClose }: { onClose: () => void }) {
 
         {error ? <p className="text-sm text-red-600">{error}</p> : null}
 
-        <div className="flex justify-end gap-2 pt-2">
+        <div className="flex flex-col-reverse gap-2 pt-2 sm:flex-row sm:justify-end">
           <Button variant="secondary" onClick={onClose}>
             Annuler
           </Button>

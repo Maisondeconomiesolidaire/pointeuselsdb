@@ -582,7 +582,7 @@ function ProjectForm({
             }}
           />
         </Field>
-        <div className="grid grid-cols-2 gap-3">
+        <div className="grid gap-3 sm:grid-cols-2">
           <Field label="Code postal">
             <Input value={postalCode} onChange={(e) => setPostalCode(e.target.value)} />
           </Field>
@@ -590,7 +590,7 @@ function ProjectForm({
             <Input value={city} onChange={(e) => setCity(e.target.value)} />
           </Field>
         </div>
-        <div className="grid grid-cols-2 gap-3">
+        <div className="grid gap-3 sm:grid-cols-2">
           <Field
             label="Distance base -> chantier (km)"
             required
@@ -627,7 +627,7 @@ function ProjectForm({
 
         {error ? <p className="text-sm text-red-600">{error}</p> : null}
 
-        <div className="flex items-center justify-between pt-2">
+        <div className="flex flex-col gap-3 pt-2 sm:flex-row sm:items-center sm:justify-between">
           {project ? (
             <Button variant="danger" size="sm" onClick={onDelete}>
               Supprimer
@@ -635,7 +635,7 @@ function ProjectForm({
           ) : (
             <span />
           )}
-          <div className="flex gap-2">
+          <div className="flex flex-col-reverse gap-2 sm:flex-row">
             <Button variant="secondary" onClick={onClose}>
               Annuler
             </Button>
