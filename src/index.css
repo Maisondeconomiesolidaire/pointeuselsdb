@@ -1,0 +1,165 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+@import "shadcn/tailwind.css";
+@import "@fontsource-variable/inter";
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+@theme {
+  /* Couleur primaire : orange Recycapp #ff7700. */
+  --color-brand-50: #fff4eb;
+  --color-brand-100: #ffe4cc;
+  --color-brand-200: #ffc699;
+  --color-brand-300: #ffa766;
+  --color-brand-400: #ff8d33;
+  --color-brand-500: #ff7700;
+  --color-brand-600: #e66b00;
+  --color-brand-700: #b85400;
+  --color-brand-800: #8a3f00;
+  --color-brand-900: #5c2a00;
+
+  --font-sans: "Inter Variable", ui-sans-serif, system-ui, -apple-system,
+    "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+
+  --shadow-strong: 0 24px 60px -20px rgba(0, 0, 0, 0.35);
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+/* ─── Thème clair (défaut) ────────────────────────────────────────────────── */
+:root {
+  --background: #f7f7f8;
+  --foreground: #18181b;
+  --card: #ffffff;
+  --card-foreground: #18181b;
+  --popover: #ffffff;
+  --popover-foreground: #18181b;
+  --primary: var(--color-brand-500);
+  --primary-foreground: #fff8ef;
+  --secondary: #f6f6f7;
+  --secondary-foreground: #18181b;
+  --muted: #f6f6f7;
+  --muted-foreground: #52525b;
+  --accent: #f0f0f1;
+  --accent-foreground: #18181b;
+  --destructive: #dc2626;
+  --border: rgba(0, 0, 0, 0.1);
+  --input: rgba(0, 0, 0, 0.02);
+  --ring: rgba(255, 119, 0, 0.3);
+  --radius: 0.625rem;
+  --sidebar: #ffffff;
+  --sidebar-foreground: #18181b;
+  --sidebar-accent: #f6f6f7;
+  --sidebar-accent-foreground: #18181b;
+  --sidebar-border: rgba(0, 0, 0, 0.1);
+  color-scheme: light;
+}
+
+/* ─── Thème sombre (classe .dark posée par le layout) ─────────────────────── */
+.dark {
+  --background: #0b0b0c;
+  --foreground: #faf7f2;
+  --card: #141416;
+  --card-foreground: #faf7f2;
+  --popover: #141416;
+  --popover-foreground: #faf7f2;
+  --primary: var(--color-brand-500);
+  --primary-foreground: #fff8ef;
+  --secondary: #1b1b1e;
+  --secondary-foreground: #f4f4f5;
+  --muted: #1b1b1e;
+  --muted-foreground: #9f9fa9;
+  --accent: #232327;
+  --accent-foreground: #faf7f2;
+  --destructive: #ef4444;
+  --border: rgba(255, 255, 255, 0.1);
+  --input: rgba(255, 255, 255, 0.05);
+  --ring: rgba(255, 119, 0, 0.35);
+  --sidebar: #141416;
+  --sidebar-foreground: #faf7f2;
+  --sidebar-accent: #1b1b1e;
+  --sidebar-accent-foreground: #faf7f2;
+  --sidebar-border: rgba(255, 255, 255, 0.1);
+  color-scheme: dark;
+}
+
+@theme inline {
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar: var(--sidebar);
+  --color-ring: var(--ring);
+  --color-input: var(--input);
+  --color-border: var(--border);
+  --color-destructive: var(--destructive);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-accent: var(--accent);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-muted: var(--muted);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-secondary: var(--secondary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-primary: var(--primary);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-popover: var(--popover);
+  --color-card-foreground: var(--card-foreground);
+  --color-card: var(--card);
+  --color-foreground: var(--foreground);
+  --color-background: var(--background);
+  --radius-sm: calc(var(--radius) * 0.6);
+  --radius-md: calc(var(--radius) * 0.8);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) * 1.4);
+  --radius-2xl: calc(var(--radius) * 1.8);
+}
+
+/* Carte translucide utilisée par EmptyState / MissingConfig. */
+.glass-card {
+  background: var(--card);
+}
+
+@keyframes fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+.animate-fade-in {
+  animation: fade-in 0.15s ease-out;
+}
+
+@keyframes page-sweep-in {
+  0% { transform: translate3d(0, 20px, 0); opacity: 0; }
+  100% { transform: translate3d(0, 0, 0); opacity: 1; }
+}
+.animate-page-sweep {
+  animation: page-sweep-in 0.35s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+@media (prefers-reduced-motion: reduce) {
+  .animate-page-sweep { animation: none; }
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  body {
+    @apply bg-background text-foreground;
+  }
+  button:not(:disabled), [role="button"]:not(:disabled) {
+    cursor: pointer;
+  }
+  html {
+    @apply font-sans;
+  }
+}
