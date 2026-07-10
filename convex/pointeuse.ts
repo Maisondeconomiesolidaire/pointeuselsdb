@@ -373,6 +373,10 @@ export const projectSummary = query({
     const laborCost = entries.reduce((s, e) => s + e.laborCost, 0);
     const travelCost = entries.reduce((s, e) => s + e.travelCost, 0);
     const totalPointed = entries.reduce((s, e) => s + e.totalCost, 0);
+    const billedPointed = entries
+      .filter((e) => (e.billingStatus ?? "a_facturer") === "facture")
+      .reduce((s, e) => s + e.totalCost, 0);
+    const toBillPointed = totalPointed - billedPointed;
     const totalExpenses = expenses.reduce((s, e) => s + e.amount, 0);
     const invoiced = invoices.reduce((s, i) => s + i.amount, 0);
     const paid = invoices
@@ -399,13 +403,121 @@ export const projectSummary = query({
       invoices,
       documents: docsWithUrl,
       totals: {
-        laborCost,
-        travelCost,
-        totalPointed,
-        totalExpenses,
-        invoiced,
-        paid,
-        pending,
+        laborCost: round2(laborCost),
+        travelCost: round2(travelCost),
+        totalPointed: round2(totalPointed),
+        billedPointed: round2(billedPointed),
+        toBillPointed: round2(toBillPointed),
+        totalExpenses: round2(totalExpenses),
+        invoiced: round2(invoiced),
+        paid: round2(paid),
+        pending: round2(pending),
+      },
+    };
+  },
+});
+
+/**
+ * Fiche client agrégée : ses projets (avec totaux), ses factures et les totaux
+ * consolidés (main-d'œuvre, dépenses, facturé, en attente). Sert d'onglets dans
+ * la fiche client (infos / projets / factures).
+ */
+export const clientSummary = query({
+  args: { clientId: v.id("ptClients") },
+  handler: async (ctx, { clientId }) => {
+    await requireStaff(ctx);
+    const client = await ctx.db.get(clientId);
+    if (!client) return null;
+
+    const projects = await ctx.db
+      .query("ptProjects")
+      .withIndex("by_client", (q) => q.eq("clientId", clientId))
+      .collect();
+    const projectIds = new Set(projects.map((p) => p._id));
+
+    const [allEntries, allInvoices, allExpenses] = await Promise.all([
+      ctx.db.query("ptTimeEntries").collect(),
+      ctx.db.query("ptInvoices").collect(),
+      ctx.db.query("ptExpenses").collect(),
+    ]);
+    const entries = allEntries.filter((e) => e.clientId === clientId);
+    const invoices = allInvoices.filter((i) => i.clientId === clientId);
+    const expenses = allExpenses.filter(
+      (e) => e.projectId && projectIds.has(e.projectId),
+    );
+
+    const byProject = new Map(
+      projects.map((p) => [
+        p._id,
+        { pointed: 0, invoiced: 0, expenses: 0, entriesCount: 0 },
+      ]),
+    );
+    for (const entry of entries) {
+      const agg = byProject.get(entry.projectId);
+      if (agg) {
+        agg.pointed += entry.totalCost;
+        agg.entriesCount += 1;
+      }
+    }
+    for (const invoice of invoices) {
+      const agg = byProject.get(invoice.projectId);
+      if (agg) agg.invoiced += invoice.amount;
+    }
+    for (const expense of expenses) {
+      const agg = expense.projectId ? byProject.get(expense.projectId) : undefined;
+      if (agg) agg.expenses += expense.amount;
+    }
+
+    const enrichedProjects = projects
+      .map((p) => {
+        const agg = byProject.get(p._id)!;
+        return {
+          _id: p._id,
+          name: p.name,
+          status: p.status,
+          city: p.city,
+          postalCode: p.postalCode,
+          distanceKm: p.distanceKm,
+          totalPointed: round2(agg.pointed),
+          invoiced: round2(agg.invoiced),
+          totalExpenses: round2(agg.expenses),
+          entriesCount: agg.entriesCount,
+        };
+      })
+      .sort((a, b) => a.name.localeCompare(b.name, "fr"));
+
+    const projectName = new Map(projects.map((p) => [p._id, p.name]));
+    const enrichedInvoices = invoices
+      .map((i) => ({ ...i, projectName: projectName.get(i.projectId) ?? "—" }))
+      .sort((a, b) => b.issuedAt - a.issuedAt);
+
+    const totalPointed = entries.reduce((s, e) => s + e.totalCost, 0);
+    const billedPointed = entries
+      .filter((e) => (e.billingStatus ?? "a_facturer") === "facture")
+      .reduce((s, e) => s + e.totalCost, 0);
+    const totalExpenses = expenses.reduce((s, e) => s + e.amount, 0);
+    const invoiced = invoices.reduce((s, i) => s + i.amount, 0);
+    const paid = invoices
+      .filter((i) => i.status === "payee")
+      .reduce((s, i) => s + i.amount, 0);
+
+    return {
+      client,
+      projects: enrichedProjects,
+      invoices: enrichedInvoices,
+      totals: {
+        totalPointed: round2(totalPointed),
+        billedPointed: round2(billedPointed),
+        toBillPointed: round2(totalPointed - billedPointed),
+        totalExpenses: round2(totalExpenses),
+        invoiced: round2(invoiced),
+        paid: round2(paid),
+        pending: round2(invoiced - paid),
+      },
+      counts: {
+        projects: projects.length,
+        invoices: invoices.length,
+        entries: entries.length,
       },
     };
   },
@@ -838,6 +950,13 @@ export const dashboard = query({
       ctx.db.query("ptEmployees").collect(),
     ]);
     const totalPointed = entries.reduce((s, e) => s + e.totalCost, 0);
+    const billedPointed = entries
+      .filter((e) => (e.billingStatus ?? "a_facturer") === "facture")
+      .reduce((s, e) => s + e.totalCost, 0);
+    const toBillPointed = totalPointed - billedPointed;
+    const toBillCount = entries.filter(
+      (e) => (e.billingStatus ?? "a_facturer") !== "facture",
+    ).length;
     const invoiced = invoices.reduce((s, i) => s + i.amount, 0);
     const paid = invoices
       .filter((i) => i.status === "payee")
@@ -848,6 +967,9 @@ export const dashboard = query({
       activeEmployees: employees.filter((e) => e.active).length,
       entriesCount: entries.length,
       totalPointed: round2(totalPointed),
+      billedPointed: round2(billedPointed),
+      toBillPointed: round2(toBillPointed),
+      toBillCount,
       invoiced: round2(invoiced),
       pending: round2(invoiced - paid),
       recentEntries: entries.slice(0, 5),

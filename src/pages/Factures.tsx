@@ -10,6 +10,7 @@ import { Modal } from "../components/ui/Modal";
 import { EmptyState } from "../components/ui/EmptyState";
 import { FullSpinner } from "../components/ui/Spinner";
 import { DocumentPicker, type PickedDoc } from "../components/ui/DocumentPicker";
+import { SearchInput, matchesSearch } from "../components/ui/SearchInput";
 import {
   formatDate,
   formatEuros,
@@ -25,6 +26,15 @@ export function Factures() {
   const updateStatus = useMutation(api.pointeuse.updateInvoiceStatus);
   const remove = useMutation(api.pointeuse.deleteInvoice);
   const [creating, setCreating] = useState(false);
+  const [search, setSearch] = useState("");
+
+  const filteredInvoices = useMemo(
+    () =>
+      (invoices ?? []).filter((i) =>
+        matchesSearch(search, [i.number, i.projectName, i.clientName]),
+      ),
+    [invoices, search],
+  );
 
   return (
     <div>
@@ -51,21 +61,36 @@ export function Factures() {
           }
         />
       ) : (
-        <div className="overflow-hidden rounded-xl border border-[var(--border)] bg-[var(--card)]">
-          <table className="w-full text-sm">
-            <thead className="border-b border-[var(--border)] text-left text-xs uppercase text-[var(--muted-foreground)]">
-              <tr>
-                <th className="px-4 py-3 font-medium">N°</th>
-                <th className="px-4 py-3 font-medium">Projet</th>
-                <th className="px-4 py-3 font-medium">Client</th>
-                <th className="px-4 py-3 font-medium">Émise</th>
-                <th className="px-4 py-3 text-right font-medium">Montant</th>
-                <th className="px-4 py-3 font-medium">Statut</th>
-                <th className="px-4 py-3" />
-              </tr>
-            </thead>
-            <tbody>
-              {invoices.map((i) => {
+        <>
+          <div className="mb-4 max-w-md">
+            <SearchInput
+              value={search}
+              onChange={setSearch}
+              placeholder="Rechercher une facture, projet, client…"
+            />
+          </div>
+          {filteredInvoices.length === 0 ? (
+            <EmptyState
+              icon={<FileText className="h-8 w-8" />}
+              title="Aucun résultat"
+              description={`Aucune facture ne correspond à « ${search} ».`}
+            />
+          ) : (
+            <div className="overflow-hidden rounded-xl border border-[var(--border)] bg-[var(--card)]">
+              <table className="w-full text-sm">
+                <thead className="border-b border-[var(--border)] text-left text-xs uppercase text-[var(--muted-foreground)]">
+                  <tr>
+                    <th className="px-4 py-3 font-medium">N°</th>
+                    <th className="px-4 py-3 font-medium">Projet</th>
+                    <th className="px-4 py-3 font-medium">Client</th>
+                    <th className="px-4 py-3 font-medium">Émise</th>
+                    <th className="px-4 py-3 text-right font-medium">Montant</th>
+                    <th className="px-4 py-3 font-medium">Statut</th>
+                    <th className="px-4 py-3" />
+                  </tr>
+                </thead>
+                <tbody>
+                  {filteredInvoices.map((i) => {
                 return (
                   <tr
                     key={i._id}
@@ -111,11 +136,13 @@ export function Factures() {
                       </button>
                     </td>
                   </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </>
       )}
 
       {creating && <InvoiceForm onClose={() => setCreating(false)} />}

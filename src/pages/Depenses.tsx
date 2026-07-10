@@ -10,12 +10,27 @@ import { Modal } from "../components/ui/Modal";
 import { EmptyState } from "../components/ui/EmptyState";
 import { FullSpinner } from "../components/ui/Spinner";
 import { DocumentPicker, type PickedDoc } from "../components/ui/DocumentPicker";
+import { SearchInput, matchesSearch } from "../components/ui/SearchInput";
 import { formatDate, formatEuros, parseDateInput, toDateInputValue } from "../lib/format";
 
 export function Depenses() {
   const expenses = useQuery(api.pointeuse.listExpenses);
   const remove = useMutation(api.pointeuse.deleteExpense);
   const [creating, setCreating] = useState(false);
+  const [search, setSearch] = useState("");
+
+  const filteredExpenses = useMemo(
+    () =>
+      (expenses ?? []).filter((x) =>
+        matchesSearch(search, [
+          x.label,
+          x.projectName,
+          x.supplierName,
+          x.category,
+        ]),
+      ),
+    [expenses, search],
+  );
 
   return (
     <div>
@@ -42,20 +57,35 @@ export function Depenses() {
           }
         />
       ) : (
-        <div className="overflow-hidden rounded-xl border border-[var(--border)] bg-[var(--card)]">
-          <table className="w-full text-sm">
-            <thead className="border-b border-[var(--border)] text-left text-xs uppercase text-[var(--muted-foreground)]">
-              <tr>
-                <th className="px-4 py-3 font-medium">Libellé</th>
-                <th className="px-4 py-3 font-medium">Projet</th>
-                <th className="px-4 py-3 font-medium">Fournisseur</th>
-                <th className="px-4 py-3 font-medium">Date</th>
-                <th className="px-4 py-3 text-right font-medium">Montant</th>
-                <th className="px-4 py-3" />
-              </tr>
-            </thead>
-            <tbody>
-              {expenses.map((x) => (
+        <>
+          <div className="mb-4 max-w-md">
+            <SearchInput
+              value={search}
+              onChange={setSearch}
+              placeholder="Rechercher une dépense, projet, fournisseur…"
+            />
+          </div>
+          {filteredExpenses.length === 0 ? (
+            <EmptyState
+              icon={<Wallet className="h-8 w-8" />}
+              title="Aucun résultat"
+              description={`Aucune dépense ne correspond à « ${search} ».`}
+            />
+          ) : (
+            <div className="overflow-hidden rounded-xl border border-[var(--border)] bg-[var(--card)]">
+              <table className="w-full text-sm">
+                <thead className="border-b border-[var(--border)] text-left text-xs uppercase text-[var(--muted-foreground)]">
+                  <tr>
+                    <th className="px-4 py-3 font-medium">Libellé</th>
+                    <th className="px-4 py-3 font-medium">Projet</th>
+                    <th className="px-4 py-3 font-medium">Fournisseur</th>
+                    <th className="px-4 py-3 font-medium">Date</th>
+                    <th className="px-4 py-3 text-right font-medium">Montant</th>
+                    <th className="px-4 py-3" />
+                  </tr>
+                </thead>
+                <tbody>
+                  {filteredExpenses.map((x) => (
                 <tr
                   key={x._id}
                   className="border-b border-[var(--border)] last:border-0"
@@ -87,10 +117,12 @@ export function Depenses() {
                     </button>
                   </td>
                 </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </>
       )}
 
       {creating && <ExpenseForm onClose={() => setCreating(false)} />}

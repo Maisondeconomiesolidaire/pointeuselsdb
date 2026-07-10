@@ -19,6 +19,7 @@ import { Modal } from "../components/ui/Modal";
 import { EmptyState } from "../components/ui/EmptyState";
 import { FullSpinner } from "../components/ui/Spinner";
 import { AddressAutocomplete } from "../components/ui/AddressAutocomplete";
+import { SearchInput, matchesSearch } from "../components/ui/SearchInput";
 import { DocumentPicker, type PickedDoc } from "../components/ui/DocumentPicker";
 import { cn } from "../lib/cn";
 import { formatDate, formatEuros } from "../lib/format";
@@ -51,6 +52,7 @@ function ProjectList({ initialProjectId }: { initialProjectId?: Id<"ptProjects">
   const projects = useQuery(api.pointeuse.listProjects);
   const navigate = useNavigate();
   const [creating, setCreating] = useState(false);
+  const [search, setSearch] = useState("");
   const [selectedProjectId, setSelectedProjectId] = useState<Id<"ptProjects"> | null>(
     initialProjectId ?? null,
   );
@@ -58,6 +60,20 @@ function ProjectList({ initialProjectId }: { initialProjectId?: Id<"ptProjects">
   useEffect(() => {
     setSelectedProjectId(initialProjectId ?? null);
   }, [initialProjectId]);
+
+  const filteredProjects = useMemo(
+    () =>
+      (projects ?? []).filter((p) =>
+        matchesSearch(search, [
+          p.name,
+          p.clientName,
+          p.address,
+          p.postalCode,
+          p.city,
+        ]),
+      ),
+    [projects, search],
+  );
 
   return (
     <div>
@@ -85,8 +101,23 @@ function ProjectList({ initialProjectId }: { initialProjectId?: Id<"ptProjects">
           }
         />
       ) : (
-        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
-          {projects.map((p) => {
+        <>
+          <div className="mb-4 max-w-md">
+            <SearchInput
+              value={search}
+              onChange={setSearch}
+              placeholder="Rechercher un projet, client, ville…"
+            />
+          </div>
+          {filteredProjects.length === 0 ? (
+            <EmptyState
+              icon={<FolderKanban className="h-8 w-8" />}
+              title="Aucun résultat"
+              description={`Aucun projet ne correspond à « ${search} ».`}
+            />
+          ) : (
+            <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+              {filteredProjects.map((p) => {
             const meta = projectStatusMeta(p.status);
             return (
               <button
@@ -95,10 +126,10 @@ function ProjectList({ initialProjectId }: { initialProjectId?: Id<"ptProjects">
                 className="rounded-xl border border-[var(--border)] bg-[var(--card)] p-4 text-left transition hover:border-brand-300 hover:shadow-sm"
               >
                 <div className="flex items-start justify-between gap-2">
-                  <p className="font-semibold text-[var(--foreground)]">{p.name}</p>
+                  <p className="min-w-0 flex-1 truncate font-semibold text-[var(--foreground)]">{p.name}</p>
                   <Badge tone={meta.tone}>{meta.label}</Badge>
                 </div>
-                <p className="mt-1 text-sm text-[var(--muted-foreground)]">{p.clientName}</p>
+                <p className="mt-1 truncate text-sm text-[var(--muted-foreground)]">{p.clientName}</p>
                 {p.city ? (
                   <p className="mt-2 flex items-center gap-1.5 text-sm text-[var(--muted-foreground)]">
                     <MapPin className="h-3.5 w-3.5" />
@@ -109,9 +140,11 @@ function ProjectList({ initialProjectId }: { initialProjectId?: Id<"ptProjects">
                   {p.distanceKm} km depuis la base · {(p.travelRatePerKm ?? 1).toFixed(2)} €/km
                 </p>
               </button>
-            );
-          })}
-        </div>
+                );
+              })}
+            </div>
+          )}
+        </>
       )}
 
       {creating ? <ProjectForm project={null} onClose={() => setCreating(false)} /> : null}
@@ -226,6 +259,28 @@ function ProjectDetailModal({
                   hint={`${formatEuros(totals.pending)} en attente`}
                 />
               </div>
+              <Section title="Facturation des pointages">
+                <div className="flex flex-wrap gap-x-8 gap-y-2">
+                  <div>
+                    <p className="text-xs uppercase text-[var(--muted-foreground)]">À facturer</p>
+                    <p className="mt-0.5 text-lg font-semibold text-amber-600">
+                      {formatEuros(totals.toBillPointed)}
+                    </p>
+                  </div>
+                  <div>
+                    <p className="text-xs uppercase text-[var(--muted-foreground)]">Facturé</p>
+                    <p className="mt-0.5 text-lg font-semibold text-emerald-600">
+                      {formatEuros(totals.billedPointed)}
+                    </p>
+                  </div>
+                  <div>
+                    <p className="text-xs uppercase text-[var(--muted-foreground)]">Total pointé</p>
+                    <p className="mt-0.5 text-lg font-semibold text-[var(--foreground)]">
+                      {formatEuros(totals.totalPointed)}
+                    </p>
+                  </div>
+                </div>
+              </Section>
               <Section title="Adresse">
                 <Muted>
                   {[project.address, project.postalCode, project.city].filter(Boolean).join(" ") ||
@@ -272,9 +327,14 @@ function ProjectDetailModal({
                             {e.travelCost > 0 ? ` · ${e.travel?.roundTrips} déplacement(s)` : ""}
                           </p>
                         </div>
-                        <p className="text-sm font-semibold text-[var(--foreground)]">
-                          {formatEuros(e.totalCost)}
-                        </p>
+                        <div className="flex shrink-0 items-center gap-2">
+                          <Badge tone={e.billingStatus === "facture" ? "green" : "amber"}>
+                            {e.billingStatus === "facture" ? "Facturé" : "À facturer"}
+                          </Badge>
+                          <p className="text-sm font-semibold text-[var(--foreground)]">
+                            {formatEuros(e.totalCost)}
+                          </p>
+                        </div>
                       </div>
                       <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-[var(--muted-foreground)]">
                         {e.lines.map((line, index) => (

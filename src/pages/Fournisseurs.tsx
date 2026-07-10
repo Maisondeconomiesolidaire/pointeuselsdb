@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { useMutation, useQuery } from "convex/react";
 import { Pencil, Plus, Trash2, Truck } from "lucide-react";
 import { api } from "../../convex/_generated/api";
@@ -9,6 +9,7 @@ import { Field, Input, Textarea } from "../components/ui/Field";
 import { Modal } from "../components/ui/Modal";
 import { EmptyState } from "../components/ui/EmptyState";
 import { FullSpinner } from "../components/ui/Spinner";
+import { SearchInput, matchesSearch } from "../components/ui/SearchInput";
 
 type Supplier = {
   _id: Id<"ptSuppliers">;
@@ -25,6 +26,22 @@ export function Fournisseurs() {
   const suppliers = useQuery(api.pointeuse.listSuppliers);
   const [editing, setEditing] = useState<Supplier | null>(null);
   const [creating, setCreating] = useState(false);
+  const [search, setSearch] = useState("");
+
+  const filteredSuppliers = useMemo(
+    () =>
+      (suppliers ?? []).filter((s) =>
+        matchesSearch(search, [
+          s.name,
+          s.supplierType,
+          s.contactName,
+          s.email,
+          s.phone,
+          s.address,
+        ]),
+      ),
+    [suppliers, search],
+  );
 
   return (
     <div>
@@ -51,11 +68,26 @@ export function Fournisseurs() {
           }
         />
       ) : (
-        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
-          {suppliers.map((s) => (
-            <button
-              key={s._id}
-              onClick={() => setEditing(s as Supplier)}
+        <>
+          <div className="mb-4 max-w-md">
+            <SearchInput
+              value={search}
+              onChange={setSearch}
+              placeholder="Rechercher un fournisseur, type, contact…"
+            />
+          </div>
+          {filteredSuppliers.length === 0 ? (
+            <EmptyState
+              icon={<Truck className="h-8 w-8" />}
+              title="Aucun résultat"
+              description={`Aucun fournisseur ne correspond à « ${search} ».`}
+            />
+          ) : (
+            <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+              {filteredSuppliers.map((s) => (
+                <button
+                  key={s._id}
+                  onClick={() => setEditing(s as Supplier)}
               className="group rounded-xl border border-[var(--border)] bg-[var(--card)] p-4 text-left transition hover:border-brand-300 hover:shadow-sm"
             >
               <div className="flex items-start justify-between gap-2">
@@ -77,9 +109,11 @@ export function Fournisseurs() {
                   {s.phone}
                 </p>
               ) : null}
-            </button>
-          ))}
-        </div>
+                </button>
+              ))}
+            </div>
+          )}
+        </>
       )}
 
       {(creating || editing) && (

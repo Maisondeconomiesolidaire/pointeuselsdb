@@ -4,6 +4,7 @@ import {
   ClipboardList,
   FolderKanban,
   Receipt,
+  StickyNote,
   Users,
   Wallet,
 } from "lucide-react";
@@ -41,6 +42,13 @@ export function Dashboard() {
       value: formatEuros(data.totalPointed),
       hint: "main-d'œuvre + déplacements",
       icon: Receipt,
+      to: "/pointages",
+    },
+    {
+      label: "Pointages à facturer",
+      value: formatEuros(data.toBillPointed),
+      hint: `${data.toBillCount} pointage${data.toBillCount > 1 ? "s" : ""} · ${formatEuros(data.billedPointed)} facturé`,
+      icon: StickyNote,
       to: "/pointages",
     },
     {

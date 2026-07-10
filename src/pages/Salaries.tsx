@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { useMutation, useQuery } from "convex/react";
 import { Pencil, Plus, Trash2, UserRound } from "lucide-react";
 import { api } from "../../convex/_generated/api";
@@ -9,6 +9,7 @@ import { AppSelect, Field, Input } from "../components/ui/Field";
 import { Modal } from "../components/ui/Modal";
 import { EmptyState } from "../components/ui/EmptyState";
 import { FullSpinner } from "../components/ui/Spinner";
+import { SearchInput, matchesSearch } from "../components/ui/SearchInput";
 import { formatEuros } from "../lib/format";
 import { EMPLOYEE_STATUSES, type EmployeeStatus } from "../lib/labels";
 
@@ -25,6 +26,15 @@ export function Salaries() {
   const employees = useQuery(api.pointeuse.listEmployees);
   const [editing, setEditing] = useState<Employee | null>(null);
   const [creating, setCreating] = useState(false);
+  const [search, setSearch] = useState("");
+
+  const filteredEmployees = useMemo(
+    () =>
+      (employees ?? []).filter((e) =>
+        matchesSearch(search, [e.firstName, e.lastName, e.status]),
+      ),
+    [employees, search],
+  );
 
   return (
     <div>
@@ -52,19 +62,34 @@ export function Salaries() {
           }
         />
       ) : (
-        <div className="overflow-hidden rounded-xl border border-[var(--border)] bg-[var(--card)]">
-          <table className="w-full text-sm">
-            <thead className="border-b border-[var(--border)] text-left text-xs uppercase text-[var(--muted-foreground)]">
-              <tr>
-                <th className="px-4 py-3 font-medium">Nom</th>
-                <th className="px-4 py-3 font-medium">Statut</th>
-                <th className="px-4 py-3 font-medium">Taux horaire</th>
-                <th className="px-4 py-3 font-medium">État</th>
-                <th className="px-4 py-3" />
-              </tr>
-            </thead>
-            <tbody>
-              {employees.map((e) => (
+        <>
+          <div className="mb-4 max-w-md">
+            <SearchInput
+              value={search}
+              onChange={setSearch}
+              placeholder="Rechercher un salarié, statut…"
+            />
+          </div>
+          {filteredEmployees.length === 0 ? (
+            <EmptyState
+              icon={<UserRound className="h-8 w-8" />}
+              title="Aucun résultat"
+              description={`Aucun salarié ne correspond à « ${search} ».`}
+            />
+          ) : (
+            <div className="overflow-hidden rounded-xl border border-[var(--border)] bg-[var(--card)]">
+              <table className="w-full text-sm">
+                <thead className="border-b border-[var(--border)] text-left text-xs uppercase text-[var(--muted-foreground)]">
+                  <tr>
+                    <th className="px-4 py-3 font-medium">Nom</th>
+                    <th className="px-4 py-3 font-medium">Statut</th>
+                    <th className="px-4 py-3 font-medium">Taux horaire</th>
+                    <th className="px-4 py-3 font-medium">État</th>
+                    <th className="px-4 py-3" />
+                  </tr>
+                </thead>
+                <tbody>
+                  {filteredEmployees.map((e) => (
                 <tr
                   key={e._id}
                   className="border-b border-[var(--border)] last:border-0 hover:bg-[var(--accent)]/40"
@@ -94,10 +119,12 @@ export function Salaries() {
                     </button>
                   </td>
                 </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </>
       )}
 
       {(creating || editing) && (
