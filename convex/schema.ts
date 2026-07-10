@@ -1473,10 +1473,6 @@ export default defineSchema(
     /** Dénormalisé depuis le projet au moment du pointage. */
     clientId: v.id("ptClients"),
     date: v.number(),
-    billingStatus: v.union(
-      v.literal("a_facturer"),
-      v.literal("facture"),
-    ),
     lines: v.array(
       v.object({
         employeeId: v.id("ptEmployees"),
@@ -1499,6 +1495,9 @@ export default defineSchema(
     laborCost: v.number(),
     travelCost: v.number(),
     totalCost: v.number(),
+    billingStatus: v.optional(
+      v.union(v.literal("a_facturer"), v.literal("facture")),
+    ),
     notes: v.optional(v.string()),
     documentIds: v.array(v.id("ptDocuments")),
     createdAt: v.number(),

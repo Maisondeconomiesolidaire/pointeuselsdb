@@ -1,13 +1,23 @@
 import { action, mutation, query } from "./_generated/server";
 import { v } from "convex/values";
-import { api } from "./_generated/api";
 import type { Doc } from "./_generated/dataModel";
-import { requireAdmin, requireStaff } from "./lib";
+import { api } from "./_generated/api";
+import {
+  accessAllows,
+  requireAdmin,
+  requireAnyCrmPermission,
+  requireCrmPermission,
+} from "./lib";
+import {
+  buildAddressString,
+  drivingDistanceKm,
+  geocode,
+} from "./livraison";
 
 /**
  * App « Pointeuse LSDB » — suivi des salariés et des chantiers.
  *
- * Toutes les fonctions sont réservées au personnel (`requireStaff`). Les tables
+ * Toutes les fonctions sont réservées au personnel (`requirePointeuseAccess`). Les tables
  * sont préfixées `pt` (cf. `schema.ts`). Les montants sont en euros, les dates
  * en millisecondes.
  *
@@ -17,86 +27,15 @@ import { requireAdmin, requireStaff } from "./lib";
  */
 
 const DEFAULT_TRAVEL_RATE_PER_KM = 1; // 1 € / km
-const LSDB_BASE_ADDRESS = "4 rue de la Prairie, 60650 Lachapelle-aux-Pots";
-
-const documentKind = v.union(
-  v.literal("chantier_photo"),
-  v.literal("expense_quote"),
-  v.literal("expense_delivery_note"),
-  v.literal("expense_invoice"),
-  v.literal("invoice_pdf"),
-  v.literal("other"),
-);
-
-const timeEntryBillingStatus = v.union(
-  v.literal("a_facturer"),
-  v.literal("facture"),
-);
-
-function buildAddressString(args: {
-  address: string;
-  postalCode?: string;
-  city?: string;
-}) {
-  return [args.address, args.postalCode, args.city]
-    .map((part) => part?.trim())
-    .filter(Boolean)
-    .join(" ");
-}
-
-async function geocodeAddress(
-  query: string,
-  accessToken: string,
-): Promise<{ lon: number; lat: number }> {
-  const url = new URL(
-    `https://api.mapbox.com/geocoding/v5/mapbox.places/${encodeURIComponent(query)}.json`,
-  );
-  url.searchParams.set("limit", "1");
-  url.searchParams.set("language", "fr");
-  url.searchParams.set("country", "fr");
-  url.searchParams.set("access_token", accessToken);
-  const response = await fetch(url.toString());
-  const payload = (await response.json()) as {
-    features?: Array<{ center?: [number, number] }>;
-    message?: string;
-  };
-  if (!response.ok) {
-    throw new Error(payload.message || "Géocodage Mapbox impossible.");
-  }
-  const center = payload.features?.[0]?.center;
-  if (!center) {
-    throw new Error("Adresse introuvable.");
-  }
-  return { lon: center[0], lat: center[1] };
-}
-
-async function drivingDistanceKm(
-  from: { lon: number; lat: number },
-  to: { lon: number; lat: number },
-  accessToken: string,
-) {
-  const coordinates = `${from.lon},${from.lat};${to.lon},${to.lat}`;
-  const url = new URL(
-    `https://api.mapbox.com/directions/v5/mapbox/driving/${coordinates}`,
-  );
-  url.searchParams.set("alternatives", "false");
-  url.searchParams.set("geometries", "geojson");
-  url.searchParams.set("overview", "false");
-  url.searchParams.set("access_token", accessToken);
-  const response = await fetch(url.toString());
-  const payload = (await response.json()) as {
-    routes?: Array<{ distance?: number }>;
-    message?: string;
-  };
-  if (!response.ok) {
-    throw new Error(payload.message || "Calcul d'itinéraire Mapbox impossible.");
-  }
-  const meters = payload.routes?.[0]?.distance;
-  if (typeof meters !== "number") {
-    throw new Error("Distance routière introuvable.");
-  }
-  return meters / 1000;
-}
+const POINTEUSE_DEPOT_ADDRESS = "4 rue de la prairie 60650 Lachapelle-aux-Pots";
+const DASHBOARD_PAGE_KEY = "pointeuse:dashboard";
+const TIME_ENTRIES_PAGE_KEY = "pointeuse:pointages";
+const PROJECTS_PAGE_KEY = "pointeuse:projets";
+const CLIENTS_PAGE_KEY = "pointeuse:clients";
+const EMPLOYEES_PAGE_KEY = "pointeuse:salaries";
+const SUPPLIERS_PAGE_KEY = "pointeuse:fournisseurs";
+const EXPENSES_PAGE_KEY = "pointeuse:depenses";
+const INVOICES_PAGE_KEY = "pointeuse:factures";
 
 /* ─── Salariés ────────────────────────────────────────────────────────────── */
 
@@ -111,7 +50,7 @@ const employeeStatus = v.union(
 export const listEmployees = query({
   args: {},
   handler: async (ctx) => {
-    await requireStaff(ctx);
+    await requireCrmPermission(ctx, EMPLOYEES_PAGE_KEY, "read");
     const employees = await ctx.db.query("ptEmployees").order("desc").collect();
     return employees.sort((a, b) =>
       `${a.lastName} ${a.firstName}`.localeCompare(
@@ -131,7 +70,7 @@ export const createEmployee = mutation({
     active: v.optional(v.boolean()),
   },
   handler: async (ctx, args) => {
-    await requireStaff(ctx);
+    await requireCrmPermission(ctx, EMPLOYEES_PAGE_KEY, "create");
     return await ctx.db.insert("ptEmployees", {
       firstName: args.firstName.trim(),
       lastName: args.lastName.trim(),
@@ -153,7 +92,7 @@ export const updateEmployee = mutation({
     active: v.boolean(),
   },
   handler: async (ctx, { employeeId, ...patch }) => {
-    await requireStaff(ctx);
+    await requireCrmPermission(ctx, EMPLOYEES_PAGE_KEY, "update");
     await ctx.db.patch(employeeId, {
       firstName: patch.firstName.trim(),
       lastName: patch.lastName.trim(),
@@ -167,7 +106,7 @@ export const updateEmployee = mutation({
 export const deleteEmployee = mutation({
   args: { employeeId: v.id("ptEmployees") },
   handler: async (ctx, { employeeId }) => {
-    await requireStaff(ctx);
+    await requireCrmPermission(ctx, EMPLOYEES_PAGE_KEY, "delete");
     await ctx.db.delete(employeeId);
   },
 });
@@ -188,7 +127,11 @@ const clientFields = {
 export const listClients = query({
   args: {},
   handler: async (ctx) => {
-    await requireStaff(ctx);
+    await requireAnyCrmPermission(ctx, [
+      [CLIENTS_PAGE_KEY, "read"],
+      [PROJECTS_PAGE_KEY, "create"],
+      [PROJECTS_PAGE_KEY, "update"],
+    ]);
     const clients = await ctx.db.query("ptClients").order("desc").collect();
     return clients.sort((a, b) => a.name.localeCompare(b.name, "fr"));
   },
@@ -197,7 +140,7 @@ export const listClients = query({
 export const createClient = mutation({
   args: clientFields,
   handler: async (ctx, args) => {
-    await requireStaff(ctx);
+    await requireCrmPermission(ctx, CLIENTS_PAGE_KEY, "create");
     return await ctx.db.insert("ptClients", {
       ...args,
       name: args.name.trim(),
@@ -209,7 +152,7 @@ export const createClient = mutation({
 export const updateClient = mutation({
   args: { clientId: v.id("ptClients"), ...clientFields },
   handler: async (ctx, { clientId, ...patch }) => {
-    await requireStaff(ctx);
+    await requireCrmPermission(ctx, CLIENTS_PAGE_KEY, "update");
     await ctx.db.patch(clientId, { ...patch, name: patch.name.trim() });
   },
 });
@@ -217,7 +160,7 @@ export const updateClient = mutation({
 export const deleteClient = mutation({
   args: { clientId: v.id("ptClients") },
   handler: async (ctx, { clientId }) => {
-    await requireStaff(ctx);
+    await requireCrmPermission(ctx, CLIENTS_PAGE_KEY, "delete");
     const projects = await ctx.db
       .query("ptProjects")
       .withIndex("by_client", (q) => q.eq("clientId", clientId))
@@ -256,7 +199,15 @@ const projectFields = {
 export const listProjects = query({
   args: {},
   handler: async (ctx) => {
-    await requireStaff(ctx);
+    await requireAnyCrmPermission(ctx, [
+      [PROJECTS_PAGE_KEY, "read"],
+      [TIME_ENTRIES_PAGE_KEY, "read"],
+      [TIME_ENTRIES_PAGE_KEY, "create"],
+      [EXPENSES_PAGE_KEY, "read"],
+      [EXPENSES_PAGE_KEY, "create"],
+      [INVOICES_PAGE_KEY, "read"],
+      [INVOICES_PAGE_KEY, "create"],
+    ]);
     const projects = await ctx.db.query("ptProjects").order("desc").collect();
     const clients = await ctx.db.query("ptClients").collect();
     const nameById = new Map(clients.map((c) => [c._id, c.name]));
@@ -273,7 +224,7 @@ export const listProjects = query({
 export const createProject = mutation({
   args: projectFields,
   handler: async (ctx, args) => {
-    await requireStaff(ctx);
+    await requireCrmPermission(ctx, PROJECTS_PAGE_KEY, "create");
     const client = await ctx.db.get(args.clientId);
     if (!client) throw new Error("Client introuvable.");
     return await ctx.db.insert("ptProjects", {
@@ -288,7 +239,7 @@ export const createProject = mutation({
 export const updateProject = mutation({
   args: { projectId: v.id("ptProjects"), ...projectFields },
   handler: async (ctx, { projectId, ...patch }) => {
-    await requireStaff(ctx);
+    await requireCrmPermission(ctx, PROJECTS_PAGE_KEY, "update");
     await ctx.db.patch(projectId, {
       ...patch,
       name: patch.name.trim(),
@@ -300,7 +251,7 @@ export const updateProject = mutation({
 export const deleteProject = mutation({
   args: { projectId: v.id("ptProjects") },
   handler: async (ctx, { projectId }) => {
-    await requireStaff(ctx);
+    await requireCrmPermission(ctx, PROJECTS_PAGE_KEY, "delete");
     const entries = await ctx.db
       .query("ptTimeEntries")
       .withIndex("by_project", (q) => q.eq("projectId", projectId))
@@ -321,12 +272,13 @@ export const deleteProject = mutation({
 export const projectSummary = query({
   args: { projectId: v.id("ptProjects") },
   handler: async (ctx, { projectId }) => {
-    await requireStaff(ctx);
+    await requireCrmPermission(ctx, PROJECTS_PAGE_KEY, "read");
     const project = await ctx.db.get(projectId);
     if (!project) return null;
     const client = await ctx.db.get(project.clientId);
 
-    const [entries, expenses, invoices, documents, employees, suppliers] = await Promise.all([
+    const [entries, expenses, invoices, documents, employees, suppliers] =
+      await Promise.all([
       ctx.db
         .query("ptTimeEntries")
         .withIndex("by_project", (q) => q.eq("projectId", projectId))
@@ -351,32 +303,22 @@ export const projectSummary = query({
       ctx.db.query("ptSuppliers").collect(),
     ]);
 
-    const employeeNameById = new Map(
-      employees.map((employee) => [employee._id, `${employee.firstName} ${employee.lastName}`]),
+    const employeeName = new Map(
+      employees.map((employee) => [
+        employee._id,
+        `${employee.firstName} ${employee.lastName}`,
+      ]),
     );
-    const supplierNameById = new Map(suppliers.map((supplier) => [supplier._id, supplier.name]));
-
-    const enrichedEntries = entries.map((entry) => ({
-      ...entry,
-      lines: entry.lines.map((line) => ({
-        ...line,
-        employeeName: employeeNameById.get(line.employeeId) ?? "—",
-      })),
-    }));
-    const enrichedExpenses = expenses.map((expense) => ({
-      ...expense,
-      supplierName: expense.supplierId
-        ? supplierNameById.get(expense.supplierId) ?? "—"
-        : null,
-    }));
+    const supplierName = new Map(
+      suppliers.map((supplier) => [supplier._id, supplier.name]),
+    );
 
     const laborCost = entries.reduce((s, e) => s + e.laborCost, 0);
     const travelCost = entries.reduce((s, e) => s + e.travelCost, 0);
     const totalPointed = entries.reduce((s, e) => s + e.totalCost, 0);
     const billedPointed = entries
-      .filter((e) => (e.billingStatus ?? "a_facturer") === "facture")
+      .filter((e) => e.billingStatus === "facture")
       .reduce((s, e) => s + e.totalCost, 0);
-    const toBillPointed = totalPointed - billedPointed;
     const totalExpenses = expenses.reduce((s, e) => s + e.amount, 0);
     const invoiced = invoices.reduce((s, i) => s + i.amount, 0);
     const paid = invoices
@@ -387,6 +329,7 @@ export const projectSummary = query({
     const docsWithUrl = await Promise.all(
       documents.map(async (d) => ({
         ...d,
+        kind: d.kind ?? "other",
         url: await ctx.storage.getUrl(d.storageId),
       })),
     );
@@ -398,126 +341,32 @@ export const projectSummary = query({
         travelRatePerKm: project.travelRatePerKm ?? DEFAULT_TRAVEL_RATE_PER_KM,
       },
       client,
-      entries: enrichedEntries,
-      expenses: enrichedExpenses,
+      entries: entries.map((entry) => ({
+        ...entry,
+        billingStatus: entry.billingStatus ?? "a_facturer",
+        lines: entry.lines.map((line) => ({
+          ...line,
+          employeeName: employeeName.get(line.employeeId) ?? "—",
+        })),
+      })),
+      expenses: expenses.map((expense) => ({
+        ...expense,
+        supplierName: expense.supplierId
+          ? supplierName.get(expense.supplierId) ?? "—"
+          : null,
+      })),
       invoices,
       documents: docsWithUrl,
       totals: {
-        laborCost: round2(laborCost),
-        travelCost: round2(travelCost),
-        totalPointed: round2(totalPointed),
-        billedPointed: round2(billedPointed),
-        toBillPointed: round2(toBillPointed),
-        totalExpenses: round2(totalExpenses),
-        invoiced: round2(invoiced),
-        paid: round2(paid),
-        pending: round2(pending),
-      },
-    };
-  },
-});
-
-/**
- * Fiche client agrégée : ses projets (avec totaux), ses factures et les totaux
- * consolidés (main-d'œuvre, dépenses, facturé, en attente). Sert d'onglets dans
- * la fiche client (infos / projets / factures).
- */
-export const clientSummary = query({
-  args: { clientId: v.id("ptClients") },
-  handler: async (ctx, { clientId }) => {
-    await requireStaff(ctx);
-    const client = await ctx.db.get(clientId);
-    if (!client) return null;
-
-    const projects = await ctx.db
-      .query("ptProjects")
-      .withIndex("by_client", (q) => q.eq("clientId", clientId))
-      .collect();
-    const projectIds = new Set(projects.map((p) => p._id));
-
-    const [allEntries, allInvoices, allExpenses] = await Promise.all([
-      ctx.db.query("ptTimeEntries").collect(),
-      ctx.db.query("ptInvoices").collect(),
-      ctx.db.query("ptExpenses").collect(),
-    ]);
-    const entries = allEntries.filter((e) => e.clientId === clientId);
-    const invoices = allInvoices.filter((i) => i.clientId === clientId);
-    const expenses = allExpenses.filter(
-      (e) => e.projectId && projectIds.has(e.projectId),
-    );
-
-    const byProject = new Map(
-      projects.map((p) => [
-        p._id,
-        { pointed: 0, invoiced: 0, expenses: 0, entriesCount: 0 },
-      ]),
-    );
-    for (const entry of entries) {
-      const agg = byProject.get(entry.projectId);
-      if (agg) {
-        agg.pointed += entry.totalCost;
-        agg.entriesCount += 1;
-      }
-    }
-    for (const invoice of invoices) {
-      const agg = byProject.get(invoice.projectId);
-      if (agg) agg.invoiced += invoice.amount;
-    }
-    for (const expense of expenses) {
-      const agg = expense.projectId ? byProject.get(expense.projectId) : undefined;
-      if (agg) agg.expenses += expense.amount;
-    }
-
-    const enrichedProjects = projects
-      .map((p) => {
-        const agg = byProject.get(p._id)!;
-        return {
-          _id: p._id,
-          name: p.name,
-          status: p.status,
-          city: p.city,
-          postalCode: p.postalCode,
-          distanceKm: p.distanceKm,
-          totalPointed: round2(agg.pointed),
-          invoiced: round2(agg.invoiced),
-          totalExpenses: round2(agg.expenses),
-          entriesCount: agg.entriesCount,
-        };
-      })
-      .sort((a, b) => a.name.localeCompare(b.name, "fr"));
-
-    const projectName = new Map(projects.map((p) => [p._id, p.name]));
-    const enrichedInvoices = invoices
-      .map((i) => ({ ...i, projectName: projectName.get(i.projectId) ?? "—" }))
-      .sort((a, b) => b.issuedAt - a.issuedAt);
-
-    const totalPointed = entries.reduce((s, e) => s + e.totalCost, 0);
-    const billedPointed = entries
-      .filter((e) => (e.billingStatus ?? "a_facturer") === "facture")
-      .reduce((s, e) => s + e.totalCost, 0);
-    const totalExpenses = expenses.reduce((s, e) => s + e.amount, 0);
-    const invoiced = invoices.reduce((s, i) => s + i.amount, 0);
-    const paid = invoices
-      .filter((i) => i.status === "payee")
-      .reduce((s, i) => s + i.amount, 0);
-
-    return {
-      client,
-      projects: enrichedProjects,
-      invoices: enrichedInvoices,
-      totals: {
-        totalPointed: round2(totalPointed),
-        billedPointed: round2(billedPointed),
+        laborCost,
+        travelCost,
+        totalPointed,
+        billedPointed,
         toBillPointed: round2(totalPointed - billedPointed),
-        totalExpenses: round2(totalExpenses),
-        invoiced: round2(invoiced),
-        paid: round2(paid),
-        pending: round2(invoiced - paid),
-      },
-      counts: {
-        projects: projects.length,
-        invoices: invoices.length,
-        entries: entries.length,
+        totalExpenses,
+        invoiced,
+        paid,
+        pending,
       },
     };
   },
@@ -538,7 +387,11 @@ const supplierFields = {
 export const listSuppliers = query({
   args: {},
   handler: async (ctx) => {
-    await requireStaff(ctx);
+    await requireAnyCrmPermission(ctx, [
+      [SUPPLIERS_PAGE_KEY, "read"],
+      [EXPENSES_PAGE_KEY, "create"],
+      [EXPENSES_PAGE_KEY, "update"],
+    ]);
     const suppliers = await ctx.db.query("ptSuppliers").order("desc").collect();
     return suppliers.sort((a, b) => a.name.localeCompare(b.name, "fr"));
   },
@@ -547,7 +400,7 @@ export const listSuppliers = query({
 export const createSupplier = mutation({
   args: supplierFields,
   handler: async (ctx, args) => {
-    await requireStaff(ctx);
+    await requireCrmPermission(ctx, SUPPLIERS_PAGE_KEY, "create");
     return await ctx.db.insert("ptSuppliers", {
       ...args,
       name: args.name.trim(),
@@ -560,7 +413,7 @@ export const createSupplier = mutation({
 export const updateSupplier = mutation({
   args: { supplierId: v.id("ptSuppliers"), ...supplierFields },
   handler: async (ctx, { supplierId, ...patch }) => {
-    await requireStaff(ctx);
+    await requireCrmPermission(ctx, SUPPLIERS_PAGE_KEY, "update");
     await ctx.db.patch(supplierId, {
       ...patch,
       name: patch.name.trim(),
@@ -572,7 +425,7 @@ export const updateSupplier = mutation({
 export const deleteSupplier = mutation({
   args: { supplierId: v.id("ptSuppliers") },
   handler: async (ctx, { supplierId }) => {
-    await requireStaff(ctx);
+    await requireCrmPermission(ctx, SUPPLIERS_PAGE_KEY, "delete");
     await ctx.db.delete(supplierId);
   },
 });
@@ -582,7 +435,7 @@ export const deleteSupplier = mutation({
 export const listTimeEntries = query({
   args: { projectId: v.optional(v.id("ptProjects")) },
   handler: async (ctx, { projectId }) => {
-    await requireStaff(ctx);
+    await requireCrmPermission(ctx, TIME_ENTRIES_PAGE_KEY, "read");
     const entries = projectId
       ? await ctx.db
           .query("ptTimeEntries")
@@ -604,9 +457,9 @@ export const listTimeEntries = query({
 
     return entries.map((e) => ({
       ...e,
+      billingStatus: e.billingStatus ?? "a_facturer",
       projectName: projectName.get(e.projectId) ?? "—",
       clientName: clientName.get(e.clientId) ?? "—",
-      billingStatus: e.billingStatus ?? "a_facturer",
       lines: e.lines.map((l) => ({
         ...l,
         employeeName: empName.get(l.employeeId) ?? "—",
@@ -627,7 +480,9 @@ export const createTimeEntry = mutation({
     documentIds: v.optional(v.array(v.id("ptDocuments"))),
   },
   handler: async (ctx, args) => {
-    const identity = await requireStaff(ctx);
+    await requireCrmPermission(ctx, TIME_ENTRIES_PAGE_KEY, "create");
+    const identity = await ctx.auth.getUserIdentity();
+    if (!identity) throw new Error("Non authentifié.");
     const project = await ctx.db.get(args.projectId);
     if (!project) throw new Error("Projet introuvable.");
 
@@ -671,12 +526,12 @@ export const createTimeEntry = mutation({
       projectId: args.projectId,
       clientId: project.clientId,
       date: args.date,
-      billingStatus: "a_facturer",
       lines,
       travel,
       laborCost,
       travelCost,
       totalCost: round2(laborCost + travelCost),
+      billingStatus: "a_facturer",
       notes: args.notes,
       documentIds: args.documentIds ?? [],
       createdAt: Date.now(),
@@ -691,64 +546,10 @@ export const createTimeEntry = mutation({
   },
 });
 
-export const getTimeEntry = query({
-  args: { entryId: v.id("ptTimeEntries") },
-  handler: async (ctx, { entryId }) => {
-    await requireStaff(ctx);
-    const entry = await ctx.db.get(entryId);
-    if (!entry) return null;
-
-    const [project, client, employees, documents] = await Promise.all([
-      ctx.db.get(entry.projectId),
-      ctx.db.get(entry.clientId),
-      ctx.db.query("ptEmployees").collect(),
-      Promise.all(
-        entry.documentIds.map(async (documentId) => {
-          const document = await ctx.db.get(documentId);
-          if (!document) return null;
-          return {
-            ...document,
-            url: await ctx.storage.getUrl(document.storageId),
-          };
-        }),
-      ),
-    ]);
-
-    const employeeNameById = new Map(
-      employees.map((employee) => [employee._id, `${employee.firstName} ${employee.lastName}`]),
-    );
-
-    return {
-      ...entry,
-      billingStatus: entry.billingStatus ?? "a_facturer",
-      projectName: project?.name ?? "—",
-      clientName: client?.name ?? "—",
-      project,
-      client,
-      lines: entry.lines.map((line) => ({
-        ...line,
-        employeeName: employeeNameById.get(line.employeeId) ?? "—",
-      })),
-      documents: documents.filter((document): document is NonNullable<typeof document> => Boolean(document)),
-    };
-  },
-});
-
-export const updateTimeEntryBillingStatus = mutation({
-  args: {
-    entryId: v.id("ptTimeEntries"),
-    billingStatus: timeEntryBillingStatus,
-  },
-  handler: async (ctx, { entryId, billingStatus }) => {
-    await requireStaff(ctx);
-    await ctx.db.patch(entryId, { billingStatus });
-  },
-});
-
 export const deleteTimeEntry = mutation({
   args: { entryId: v.id("ptTimeEntries") },
   handler: async (ctx, { entryId }) => {
-    await requireStaff(ctx);
+    await requireCrmPermission(ctx, TIME_ENTRIES_PAGE_KEY, "delete");
     await ctx.db.delete(entryId);
   },
 });
@@ -758,7 +559,7 @@ export const deleteTimeEntry = mutation({
 export const listExpenses = query({
   args: {},
   handler: async (ctx) => {
-    await requireStaff(ctx);
+    await requireCrmPermission(ctx, EXPENSES_PAGE_KEY, "read");
     const expenses = await ctx.db.query("ptExpenses").order("desc").collect();
     const [projects, suppliers] = await Promise.all([
       ctx.db.query("ptProjects").collect(),
@@ -785,7 +586,7 @@ export const createExpense = mutation({
     documentIds: v.optional(v.array(v.id("ptDocuments"))),
   },
   handler: async (ctx, args) => {
-    await requireStaff(ctx);
+    await requireCrmPermission(ctx, EXPENSES_PAGE_KEY, "create");
     const expenseId = await ctx.db.insert("ptExpenses", {
       label: args.label.trim(),
       amount: args.amount,
@@ -806,7 +607,7 @@ export const createExpense = mutation({
 export const deleteExpense = mutation({
   args: { expenseId: v.id("ptExpenses") },
   handler: async (ctx, { expenseId }) => {
-    await requireStaff(ctx);
+    await requireCrmPermission(ctx, EXPENSES_PAGE_KEY, "delete");
     await ctx.db.delete(expenseId);
   },
 });
@@ -823,7 +624,7 @@ const invoiceStatus = v.union(
 export const listInvoices = query({
   args: {},
   handler: async (ctx) => {
-    await requireStaff(ctx);
+    await requireCrmPermission(ctx, INVOICES_PAGE_KEY, "read");
     const invoices = await ctx.db.query("ptInvoices").order("desc").collect();
     const [projects, clients] = await Promise.all([
       ctx.db.query("ptProjects").collect(),
@@ -852,7 +653,7 @@ export const createInvoice = mutation({
     documentIds: v.optional(v.array(v.id("ptDocuments"))),
   },
   handler: async (ctx, args) => {
-    await requireStaff(ctx);
+    await requireCrmPermission(ctx, INVOICES_PAGE_KEY, "create");
     const project = await ctx.db.get(args.projectId);
     if (!project) throw new Error("Projet introuvable.");
     const invoiceId = await ctx.db.insert("ptInvoices", {
@@ -882,7 +683,7 @@ export const updateInvoiceStatus = mutation({
     paidAt: v.optional(v.number()),
   },
   handler: async (ctx, { invoiceId, status, paidAt }) => {
-    await requireStaff(ctx);
+    await requireCrmPermission(ctx, INVOICES_PAGE_KEY, "update");
     await ctx.db.patch(invoiceId, {
       status,
       paidAt: status === "payee" ? paidAt ?? Date.now() : undefined,
@@ -893,7 +694,7 @@ export const updateInvoiceStatus = mutation({
 export const deleteInvoice = mutation({
   args: { invoiceId: v.id("ptInvoices") },
   handler: async (ctx, { invoiceId }) => {
-    await requireStaff(ctx);
+    await requireCrmPermission(ctx, INVOICES_PAGE_KEY, "delete");
     await ctx.db.delete(invoiceId);
   },
 });
@@ -910,16 +711,33 @@ export const registerDocument = mutation({
     storageId: v.id("_storage"),
     name: v.string(),
     mimeType: v.optional(v.string()),
-    kind: v.optional(documentKind),
+    kind: v.optional(
+      v.union(
+        v.literal("chantier_photo"),
+        v.literal("expense_quote"),
+        v.literal("expense_delivery_note"),
+        v.literal("expense_invoice"),
+        v.literal("invoice_pdf"),
+        v.literal("other"),
+      ),
+    ),
     projectId: v.id("ptProjects"),
   },
   handler: async (ctx, args) => {
-    const identity = await requireStaff(ctx);
+    await requireAnyCrmPermission(ctx, [
+      [PROJECTS_PAGE_KEY, "create"],
+      [PROJECTS_PAGE_KEY, "update"],
+      [TIME_ENTRIES_PAGE_KEY, "create"],
+      [EXPENSES_PAGE_KEY, "create"],
+      [INVOICES_PAGE_KEY, "create"],
+    ]);
+    const identity = await ctx.auth.getUserIdentity();
+    if (!identity) throw new Error("Non authentifié.");
     return await ctx.db.insert("ptDocuments", {
       storageId: args.storageId,
       name: args.name,
       mimeType: args.mimeType,
-      kind: args.kind,
+      kind: args.kind ?? "other",
       projectId: args.projectId,
       uploadedAt: Date.now(),
       uploadedBy: identity.email ?? undefined,
@@ -930,10 +748,192 @@ export const registerDocument = mutation({
 export const deleteDocument = mutation({
   args: { documentId: v.id("ptDocuments") },
   handler: async (ctx, { documentId }) => {
-    await requireStaff(ctx);
+    await requireAnyCrmPermission(ctx, [
+      [PROJECTS_PAGE_KEY, "update"],
+      [TIME_ENTRIES_PAGE_KEY, "update"],
+      [EXPENSES_PAGE_KEY, "update"],
+      [INVOICES_PAGE_KEY, "update"],
+      [PROJECTS_PAGE_KEY, "delete"],
+      [TIME_ENTRIES_PAGE_KEY, "delete"],
+      [EXPENSES_PAGE_KEY, "delete"],
+      [INVOICES_PAGE_KEY, "delete"],
+    ]);
     const doc = await ctx.db.get(documentId);
     if (doc) await ctx.storage.delete(doc.storageId);
     await ctx.db.delete(documentId);
+  },
+});
+
+export const updateTimeEntryBillingStatus = mutation({
+  args: {
+    entryId: v.id("ptTimeEntries"),
+    billingStatus: v.union(v.literal("a_facturer"), v.literal("facture")),
+  },
+  handler: async (ctx, { entryId, billingStatus }) => {
+    await requireCrmPermission(ctx, TIME_ENTRIES_PAGE_KEY, "update");
+    await ctx.db.patch(entryId, { billingStatus });
+  },
+});
+
+export const getTimeEntry = query({
+  args: { entryId: v.id("ptTimeEntries") },
+  handler: async (ctx, { entryId }) => {
+    await requireCrmPermission(ctx, TIME_ENTRIES_PAGE_KEY, "read");
+    const entry = await ctx.db.get(entryId);
+    if (!entry) return null;
+
+    const [project, client, employees, documents] = await Promise.all([
+      ctx.db.get(entry.projectId),
+      ctx.db.get(entry.clientId),
+      ctx.db.query("ptEmployees").collect(),
+      Promise.all(
+        entry.documentIds.map(async (documentId) => {
+          const document = await ctx.db.get(documentId);
+          if (!document) return null;
+          return {
+            ...document,
+            kind: document.kind ?? "other",
+            url: await ctx.storage.getUrl(document.storageId),
+          };
+        }),
+      ),
+    ]);
+
+    const employeeName = new Map(
+      employees.map((employee) => [
+        employee._id,
+        `${employee.firstName} ${employee.lastName}`,
+      ]),
+    );
+
+    return {
+      ...entry,
+      billingStatus: entry.billingStatus ?? "a_facturer",
+      projectName: project?.name ?? "—",
+      clientName: client?.name ?? "—",
+      lines: entry.lines.map((line) => ({
+        ...line,
+        employeeName: employeeName.get(line.employeeId) ?? "—",
+      })),
+      documents: documents.filter(
+        (document): document is NonNullable<typeof document> => Boolean(document),
+      ),
+    };
+  },
+});
+
+export const clientSummary = query({
+  args: { clientId: v.id("ptClients") },
+  handler: async (ctx, { clientId }) => {
+    await requireCrmPermission(ctx, CLIENTS_PAGE_KEY, "read");
+    const client = await ctx.db.get(clientId);
+    if (!client) return null;
+
+    const [projects, entries, invoices] = await Promise.all([
+      ctx.db
+        .query("ptProjects")
+        .withIndex("by_client", (q) => q.eq("clientId", clientId))
+        .collect(),
+      ctx.db.query("ptTimeEntries").collect(),
+      ctx.db.query("ptInvoices").collect(),
+    ]);
+
+    const projectIds = new Set(projects.map((project) => project._id));
+    const projectSummaries = projects.map((project) => {
+      const projectEntries = entries.filter((entry) => entry.projectId === project._id);
+      const projectInvoices = invoices.filter((invoice) => invoice.projectId === project._id);
+      return {
+        ...project,
+        travelRatePerKm: project.travelRatePerKm ?? DEFAULT_TRAVEL_RATE_PER_KM,
+        entriesCount: projectEntries.length,
+        totalPointed: round2(
+          projectEntries.reduce((sum, entry) => sum + entry.totalCost, 0),
+        ),
+        invoiced: round2(
+          projectInvoices.reduce((sum, invoice) => sum + invoice.amount, 0),
+        ),
+      };
+    });
+
+    const clientEntries = entries.filter((entry) => projectIds.has(entry.projectId));
+    const clientInvoices = invoices
+      .filter((invoice) => invoice.clientId === clientId)
+      .map((invoice) => {
+        const project = projects.find((item) => item._id === invoice.projectId);
+        return {
+          ...invoice,
+          projectName: project?.name ?? "—",
+        };
+      });
+
+    const totalPointed = round2(
+      clientEntries.reduce((sum, entry) => sum + entry.totalCost, 0),
+    );
+    const billedPointed = round2(
+      clientEntries
+        .filter((entry) => entry.billingStatus === "facture")
+        .reduce((sum, entry) => sum + entry.totalCost, 0),
+    );
+    const totalExpenses = 0;
+    const invoicedTotal = round2(
+      clientInvoices.reduce((sum, invoice) => sum + invoice.amount, 0),
+    );
+    const pending = round2(
+      clientInvoices
+        .filter((invoice) => invoice.status !== "payee")
+        .reduce((sum, invoice) => sum + invoice.amount, 0),
+    );
+
+    return {
+      client,
+      projects: projectSummaries.sort((a, b) => a.name.localeCompare(b.name, "fr")),
+      invoices: clientInvoices.sort((a, b) => b.issuedAt - a.issuedAt),
+      counts: {
+        projects: projectSummaries.length,
+        entries: clientEntries.length,
+        invoices: clientInvoices.length,
+      },
+      totals: {
+        totalPointed,
+        billedPointed,
+        toBillPointed: round2(totalPointed - billedPointed),
+        totalExpenses,
+        invoiced: invoicedTotal,
+        pending,
+      },
+    };
+  },
+});
+
+export const computeProjectDistance = action({
+  args: {
+    address: v.string(),
+    postalCode: v.optional(v.string()),
+    city: v.optional(v.string()),
+  },
+  handler: async (ctx, args): Promise<{ distanceKm: number }> => {
+    const access = await ctx.runQuery(api.permissions.myAccess, {});
+    if (
+      !accessAllows(access, PROJECTS_PAGE_KEY, "create") &&
+      !accessAllows(access, PROJECTS_PAGE_KEY, "update")
+    ) {
+      throw new Error("Accès CRM insuffisant.");
+    }
+    const accessToken = process.env.MAPBOX_ACCESS_TOKEN;
+    if (!accessToken) {
+      throw new Error("MAPBOX_ACCESS_TOKEN n'est pas configurée côté Convex.");
+    }
+    const destination = buildAddressString(args);
+    if (!destination) {
+      throw new Error("Adresse du chantier manquante.");
+    }
+
+    const [depot, target] = await Promise.all([
+      geocode(POINTEUSE_DEPOT_ADDRESS, accessToken),
+      geocode(destination, accessToken),
+    ]);
+    const oneWayKm = await drivingDistanceKm(depot, target, accessToken);
+    return { distanceKm: Math.round(oneWayKm * 10) / 10 };
   },
 });
 
@@ -942,7 +942,7 @@ export const deleteDocument = mutation({
 export const dashboard = query({
   args: {},
   handler: async (ctx) => {
-    await requireStaff(ctx);
+    await requireCrmPermission(ctx, DASHBOARD_PAGE_KEY, "read");
     const [projects, entries, invoices, employees] = await Promise.all([
       ctx.db.query("ptProjects").collect(),
       ctx.db.query("ptTimeEntries").order("desc").collect(),
@@ -951,9 +951,8 @@ export const dashboard = query({
     ]);
     const totalPointed = entries.reduce((s, e) => s + e.totalCost, 0);
     const billedPointed = entries
-      .filter((e) => (e.billingStatus ?? "a_facturer") === "facture")
+      .filter((e) => e.billingStatus === "facture")
       .reduce((s, e) => s + e.totalCost, 0);
-    const toBillPointed = totalPointed - billedPointed;
     const toBillCount = entries.filter(
       (e) => (e.billingStatus ?? "a_facturer") !== "facture",
     ).length;
@@ -968,41 +967,12 @@ export const dashboard = query({
       entriesCount: entries.length,
       totalPointed: round2(totalPointed),
       billedPointed: round2(billedPointed),
-      toBillPointed: round2(toBillPointed),
+      toBillPointed: round2(totalPointed - billedPointed),
       toBillCount,
       invoiced: round2(invoiced),
       pending: round2(invoiced - paid),
       recentEntries: entries.slice(0, 5),
     };
-  },
-});
-
-export const computeProjectDistance = action({
-  args: {
-    address: v.string(),
-    postalCode: v.optional(v.string()),
-    city: v.optional(v.string()),
-  },
-  handler: async (ctx, args): Promise<{ distanceKm: number }> => {
-    const access = await ctx.runQuery(api.permissions.myAccess, {});
-    if (!access.isStaff && !access.isAdmin && !access.bootstrapMode) {
-      throw new Error("Accès réservé au personnel.");
-    }
-    const accessToken = process.env.MAPBOX_ACCESS_TOKEN;
-    if (!accessToken) {
-      throw new Error("MAPBOX_ACCESS_TOKEN n'est pas configurée côté Convex.");
-    }
-    const destination = buildAddressString(args);
-    if (!destination) {
-      throw new Error("Adresse du chantier manquante.");
-    }
-
-    const [base, target] = await Promise.all([
-      geocodeAddress(LSDB_BASE_ADDRESS, accessToken),
-      geocodeAddress(destination, accessToken),
-    ]);
-    const distanceKm = await drivingDistanceKm(base, target, accessToken);
-    return { distanceKm: Math.round(distanceKm * 10) / 10 };
   },
 });
 
@@ -1363,7 +1333,6 @@ export const adminImportLegacyPointeuse = mutation({
         projectId: project._id,
         clientId: project.clientId,
         date,
-        billingStatus: existing?.billingStatus ?? "a_facturer",
         lines,
         travel,
         laborCost,

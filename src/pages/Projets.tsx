@@ -43,6 +43,73 @@ type Project = {
 
 type ProjectTab = "details" | "client" | "pointages" | "depenses" | "commercial";
 
+type ProjectSummary = {
+  project: Project & { clientName?: string };
+  client: {
+    name: string;
+    contactName?: string;
+    email?: string;
+    phone?: string;
+    address?: string;
+    postalCode?: string;
+    city?: string;
+    notes?: string;
+  } | null;
+  entries: Array<{
+    _id: Id<"ptTimeEntries">;
+    date: number;
+    laborCost: number;
+    travelCost: number;
+    totalCost: number;
+    notes?: string;
+    travel?: {
+      roundTrips: number;
+      distanceKm: number;
+      ratePerKm?: number;
+      cost: number;
+    };
+    billingStatus: "a_facturer" | "facture";
+    lines: Array<{
+      employeeId: Id<"ptEmployees">;
+      hours: number;
+      hourlyRate: number;
+      cost: number;
+      employeeName: string;
+    }>;
+  }>;
+  expenses: Array<{
+    _id: Id<"ptExpenses">;
+    label: string;
+    amount: number;
+    date: number;
+    supplierName?: string | null;
+  }>;
+  invoices: Array<{
+    _id: Id<"ptInvoices">;
+    number: string;
+    amount: number;
+    status: "brouillon" | "envoyee" | "payee" | "en_retard";
+    issuedAt: number;
+  }>;
+  documents: Array<{
+    _id: Id<"ptDocuments">;
+    name: string;
+    kind: string;
+    url: string | null;
+  }>;
+  totals: {
+    laborCost: number;
+    travelCost: number;
+    totalPointed: number;
+    billedPointed: number;
+    toBillPointed: number;
+    totalExpenses: number;
+    invoiced: number;
+    paid: number;
+    pending: number;
+  };
+};
+
 export function Projets() {
   const { projectId } = useParams();
   return <ProjectList initialProjectId={projectId as Id<"ptProjects"> | undefined} />;
@@ -190,7 +257,8 @@ function ProjectDetailModal({
     );
   }
 
-  const { project, client, entries, expenses, invoices, documents, totals } = summary;
+  const { project, client, entries, expenses, invoices, documents, totals } =
+    summary as ProjectSummary;
   const meta = projectStatusMeta(project.status);
   const tabs: Array<{ key: ProjectTab; label: string }> = [
     { key: "details", label: "Détails du projet" },

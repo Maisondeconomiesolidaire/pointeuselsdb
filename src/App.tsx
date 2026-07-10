@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { type ReactNode, useEffect, useState } from "react";
 import {
   Link,
   NavLink,
@@ -33,6 +33,7 @@ import {
 import { api } from "../convex/_generated/api";
 import { cn } from "./lib/cn";
 import { FullSpinner } from "./components/ui/Spinner";
+import { AppSwitcher } from "./components/AppSwitcher";
 import { Dashboard } from "./pages/Dashboard";
 import { Pointages } from "./pages/Pointages";
 import { Projets } from "./pages/Projets";
@@ -44,14 +45,14 @@ import { Factures } from "./pages/Factures";
 import { UpdateAvailableBanner } from "./components/UpdateAvailableBanner";
 
 const NAV = [
-  { to: "/", label: "Tableau de bord", icon: LayoutDashboard, end: true },
-  { to: "/pointages", label: "Pointages", icon: ClipboardList },
-  { to: "/projets", label: "Projets", icon: FolderKanban },
-  { to: "/clients", label: "Clients", icon: Building2 },
-  { to: "/salaries", label: "Salariés", icon: Users },
-  { to: "/fournisseurs", label: "Fournisseurs", icon: Truck },
-  { to: "/depenses", label: "Dépenses", icon: Wallet },
-  { to: "/factures", label: "Factures", icon: FileText },
+  { to: "/", label: "Tableau de bord", icon: LayoutDashboard, end: true, pageKey: "pointeuse:dashboard" },
+  { to: "/pointages", label: "Pointages", icon: ClipboardList, pageKey: "pointeuse:pointages" },
+  { to: "/projets", label: "Projets", icon: FolderKanban, pageKey: "pointeuse:projets" },
+  { to: "/clients", label: "Clients", icon: Building2, pageKey: "pointeuse:clients" },
+  { to: "/salaries", label: "Salariés", icon: Users, pageKey: "pointeuse:salaries" },
+  { to: "/fournisseurs", label: "Fournisseurs", icon: Truck, pageKey: "pointeuse:fournisseurs" },
+  { to: "/depenses", label: "Dépenses", icon: Wallet, pageKey: "pointeuse:depenses" },
+  { to: "/factures", label: "Factures", icon: FileText, pageKey: "pointeuse:factures" },
 ];
 
 const NAV_ACTIVE = "bg-brand-500 text-white shadow-sm";
@@ -64,6 +65,7 @@ function Sidebar({
   userName,
   userEmail,
   userImage,
+  navItems,
 }: {
   onNavigate?: () => void;
   theme: "light" | "dark";
@@ -72,17 +74,19 @@ function Sidebar({
   userName: string;
   userEmail?: string;
   userImage?: string | null;
+  navItems: typeof NAV;
 }) {
   return (
     <div className="flex h-full flex-col bg-[var(--card)]">
-      <div className="flex h-16 items-center border-b border-[var(--border)] px-5">
+      <div className="flex h-16 items-center justify-between gap-2 border-b border-[var(--border)] px-5">
         <Link to="/" onClick={onNavigate} className="flex items-center">
           <img src="/logo-lsdb.png" alt="LSDB" className="h-11 w-11 object-contain" />
         </Link>
+        <AppSwitcher current="pointeuse" />
       </div>
 
       <nav className="min-h-0 flex-1 space-y-1 overflow-y-auto p-3">
-        {NAV.map((item) => {
+        {navItems.map((item) => {
           const active =
             currentPath === item.to ||
             (!item.end && currentPath.startsWith(item.to));
@@ -141,6 +145,35 @@ function Sidebar({
       </div>
     </div>
   );
+}
+
+type Access = {
+  isAdmin: boolean;
+  grants: { pageKey: string; actions: string[] }[];
+};
+
+function canAccess(access: Access, pageKey: string, action = "read") {
+  if (access.isAdmin) return true;
+  return Boolean(access.grants.find((grant) => grant.pageKey === pageKey)?.actions.includes(action));
+}
+
+function firstAllowedRoute(access: Access) {
+  return NAV.find((item) => canAccess(access, item.pageKey))?.to ?? "/compte";
+}
+
+function RequirePage({
+  access,
+  pageKey,
+  children,
+}: {
+  access: Access;
+  pageKey: string;
+  children: ReactNode;
+}) {
+  if (canAccess(access, pageKey)) {
+    return <>{children}</>;
+  }
+  return <Navigate to={firstAllowedRoute(access)} replace />;
 }
 
 function MobileLogo() {
@@ -222,13 +255,14 @@ function useTheme() {
   return [theme, setTheme] as const;
 }
 
-function AppLayout() {
+function AppLayout({ access }: { access: Access }) {
   const [mobileOpen, setMobileOpen] = useState(false);
   const [theme, setTheme] = useTheme();
   const { user } = useUser();
   const location = useLocation();
   const userName = user?.fullName ?? user?.primaryEmailAddress?.emailAddress ?? "Moi";
   const userEmail = user?.primaryEmailAddress?.emailAddress;
+  const navItems = NAV.filter((item) => canAccess(access, item.pageKey));
 
   const sidebar = (
     <Sidebar
@@ -238,6 +272,7 @@ function AppLayout() {
       userName={userName}
       userEmail={userEmail}
       userImage={user?.imageUrl}
+      navItems={navItems}
       onNavigate={() => setMobileOpen(false)}
     />
   );
@@ -285,17 +320,17 @@ function AppLayout() {
         className="animate-page-sweep mx-auto max-w-7xl px-4 py-7 sm:px-6 lg:px-8"
       >
         <Routes>
-          <Route path="/" element={<Dashboard />} />
-          <Route path="/pointages" element={<Pointages />} />
-          <Route path="/projets" element={<Projets />} />
-          <Route path="/projets/:projectId" element={<Projets />} />
-          <Route path="/clients" element={<Clients />} />
-          <Route path="/salaries" element={<Salaries />} />
-          <Route path="/fournisseurs" element={<Fournisseurs />} />
-          <Route path="/depenses" element={<Depenses />} />
-          <Route path="/factures" element={<Factures />} />
+          <Route path="/" element={<RequirePage access={access} pageKey="pointeuse:dashboard"><Dashboard /></RequirePage>} />
+          <Route path="/pointages" element={<RequirePage access={access} pageKey="pointeuse:pointages"><Pointages /></RequirePage>} />
+          <Route path="/projets" element={<RequirePage access={access} pageKey="pointeuse:projets"><Projets /></RequirePage>} />
+          <Route path="/projets/:projectId" element={<RequirePage access={access} pageKey="pointeuse:projets"><Projets /></RequirePage>} />
+          <Route path="/clients" element={<RequirePage access={access} pageKey="pointeuse:clients"><Clients /></RequirePage>} />
+          <Route path="/salaries" element={<RequirePage access={access} pageKey="pointeuse:salaries"><Salaries /></RequirePage>} />
+          <Route path="/fournisseurs" element={<RequirePage access={access} pageKey="pointeuse:fournisseurs"><Fournisseurs /></RequirePage>} />
+          <Route path="/depenses" element={<RequirePage access={access} pageKey="pointeuse:depenses"><Depenses /></RequirePage>} />
+          <Route path="/factures" element={<RequirePage access={access} pageKey="pointeuse:factures"><Factures /></RequirePage>} />
           <Route path="/compte" element={<Compte />} />
-          <Route path="*" element={<Navigate to="/" replace />} />
+          <Route path="*" element={<Navigate to={firstAllowedRoute(access)} replace />} />
         </Routes>
       </main>
     </div>
@@ -340,20 +375,25 @@ function AccessGate() {
   if (isLoading || (isAuthenticated && access === undefined)) {
     return <FullSpinner label="Chargement…" />;
   }
-  if (!access?.isStaff) {
+  const canAccess = Boolean(
+    access &&
+      (access.isAdmin ||
+        access.grants.some((grant) => grant.pageKey.startsWith("pointeuse:"))),
+  );
+  if (!canAccess) {
     return (
       <div className="flex h-full flex-col items-center justify-center gap-3 p-8 text-center">
         <h1 className="text-xl font-semibold text-[var(--foreground)]">
-          Accès réservé au personnel
+          Accès à la Pointeuse non autorisé
         </h1>
         <p className="max-w-sm text-sm text-[var(--muted-foreground)]">
-          Votre compte n'a pas encore accès à la pointeuse. Contactez un
-          administrateur Mes Outils.
+          Votre compte n'a pas encore les droits « Pointeuse ». Demandez à un
+          administrateur Mes Outils de vous les attribuer.
         </p>
       </div>
     );
   }
-  return <AppLayout />;
+  return <AppLayout access={access as Access} />;
 }
 
 export default function App() {
