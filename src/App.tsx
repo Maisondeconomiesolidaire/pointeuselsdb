@@ -293,9 +293,12 @@ function AppLayout({ access }: { access: Access }) {
           <Menu className="h-5 w-5" />
         </button>
         <MobileLogo />
-        <Link to="/compte" className="ml-auto">
-          <UserAvatar name={userName} src={user?.imageUrl} />
-        </Link>
+        <div className="ml-auto flex items-center gap-1">
+          <AppSwitcher current="pointeuse" />
+          <Link to="/compte">
+            <UserAvatar name={userName} src={user?.imageUrl} />
+          </Link>
+        </div>
       </header>
 
       {mobileOpen ? (
