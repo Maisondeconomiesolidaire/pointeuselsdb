@@ -121,6 +121,58 @@ export const updateEmployee = mutation({
   },
 });
 
+export const updateEmployeeRateAndRecomputeEntries = mutation({
+  args: {
+    employeeId: v.id("ptEmployees"),
+    hourlyRate: v.number(),
+  },
+  handler: async (ctx, { employeeId, hourlyRate }) => {
+    await requireCrmPermission(ctx, EMPLOYEES_PAGE_KEY, "update");
+    await requireCrmPermission(ctx, TIME_ENTRIES_PAGE_KEY, "update");
+
+    const employee = await ctx.db.get(employeeId);
+    if (!employee) throw new Error("Salarié introuvable.");
+
+    await ctx.db.patch(employeeId, { hourlyRate });
+
+    const entries = await ctx.db.query("ptTimeEntries").collect();
+    let updatedEntries = 0;
+
+    for (const entry of entries) {
+      let changed = false;
+      const lines = entry.lines.map((line) => {
+        if (line.employeeId !== employeeId) return line;
+        changed = true;
+        const cost = round2(line.hours * hourlyRate);
+        return {
+          ...line,
+          hourlyRate,
+          cost,
+        };
+      });
+
+      if (!changed) continue;
+
+      const laborCost = round2(lines.reduce((sum, line) => sum + line.cost, 0));
+      const totalCost = round2(laborCost + entry.travelCost);
+
+      await ctx.db.patch(entry._id, {
+        lines,
+        laborCost,
+        totalCost,
+      });
+      updatedEntries += 1;
+    }
+
+    return {
+      employeeId,
+      employeeName: `${employee.firstName} ${employee.lastName}`.trim(),
+      hourlyRate,
+      updatedEntries,
+    };
+  },
+});
+
 export const deleteEmployee = mutation({
   args: { employeeId: v.id("ptEmployees") },
   handler: async (ctx, { employeeId }) => {
