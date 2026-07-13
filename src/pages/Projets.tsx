@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { useAction, useMutation, useQuery } from "convex/react";
 import {
@@ -655,6 +655,7 @@ function ProjectForm({
   const [notes, setNotes] = useState(project?.notes ?? "");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const previousClientIdRef = useRef(project?.clientId ?? "");
   const clientOptions = useMemo(
     () => [
       { value: "", label: "Sélectionner" },
@@ -662,10 +663,23 @@ function ProjectForm({
     ],
     [clients],
   );
+  const selectedClient = useMemo(
+    () => (clients ?? []).find((client) => client._id === clientId) ?? null,
+    [clientId, clients],
+  );
   const statusOptions = useMemo(
     () => PROJECT_STATUSES.map((s) => ({ value: s.value, label: s.label })),
     [],
   );
+
+  useEffect(() => {
+    if (clientId === previousClientIdRef.current) return;
+    previousClientIdRef.current = clientId;
+    if (!selectedClient) return;
+    setAddress(selectedClient.address ?? "");
+    setPostalCode(selectedClient.postalCode ?? "");
+    setCity(selectedClient.city ?? "");
+  }, [clientId, selectedClient]);
 
   useEffect(() => {
     const destination = [address, postalCode, city].filter(Boolean).join(" ").trim();
