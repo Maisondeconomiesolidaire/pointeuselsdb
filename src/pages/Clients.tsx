@@ -299,6 +299,21 @@ function ClientDetailModal({
                           {p.entriesCount} pointage{p.entriesCount > 1 ? "s" : ""} ·{" "}
                           {formatEuros(p.totalPointed)} pointé · {formatEuros(p.invoiced)} facturé
                         </p>
+                        <div className="mt-2 flex items-center justify-between rounded-lg bg-[var(--accent)] px-2.5 py-2">
+                          <span className="text-xs font-medium uppercase text-[var(--muted-foreground)]">
+                            Reste à facturer
+                          </span>
+                          <span
+                            className={cn(
+                              "text-sm font-semibold",
+                              (p.toBillPointed ?? 0) > 0
+                                ? "text-amber-600"
+                                : "text-emerald-600",
+                            )}
+                          >
+                            {formatEuros(p.toBillPointed ?? 0)}
+                          </span>
+                        </div>
                       </div>
                       <ChevronRight className="h-4 w-4 shrink-0 text-[var(--muted-foreground)] transition group-hover:translate-x-0.5" />
                     </button>

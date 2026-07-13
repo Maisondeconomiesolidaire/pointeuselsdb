@@ -95,6 +95,7 @@ type ProjectSummary = {
     _id: Id<"ptDocuments">;
     name: string;
     kind: string;
+    supplierName?: string | null;
     url: string | null;
   }>;
   totals: {
@@ -206,6 +207,19 @@ function ProjectList({ initialProjectId }: { initialProjectId?: Id<"ptProjects">
                 <p className="mt-1 text-xs text-[var(--muted-foreground)]">
                   {p.distanceKm} km depuis la base · {(p.travelRatePerKm ?? 1).toFixed(2)} €/km
                 </p>
+                <div className="mt-3 rounded-xl bg-[var(--accent)] px-3 py-2.5">
+                  <span className="text-[11px] font-medium uppercase tracking-wide text-[var(--muted-foreground)]">
+                    Reste à facturer
+                  </span>
+                  <span
+                    className={cn(
+                      "mt-1 block text-lg font-semibold",
+                      (p.toBillPointed ?? 0) > 0 ? "text-amber-600" : "text-emerald-600",
+                    )}
+                  >
+                    {formatEuros(p.toBillPointed ?? 0)}
+                  </span>
+                </div>
               </button>
                 );
               })}
@@ -236,11 +250,13 @@ function ProjectDetailModal({
   onClose: () => void;
 }) {
   const summary = useQuery(api.pointeuse.projectSummary, { projectId });
+  const suppliers = useQuery(api.pointeuse.listSuppliers);
   const [editing, setEditing] = useState(false);
   const [tab, setTab] = useState<ProjectTab>("details");
   const [quoteDocs, setQuoteDocs] = useState<PickedDoc[]>([]);
   const [deliveryDocs, setDeliveryDocs] = useState<PickedDoc[]>([]);
   const [invoiceDocs, setInvoiceDocs] = useState<PickedDoc[]>([]);
+  const [deliverySupplierId, setDeliverySupplierId] = useState<string>("");
 
   if (summary === undefined) {
     return (
@@ -276,6 +292,10 @@ function ProjectDetailModal({
       d.kind !== "expense_delivery_note" &&
       d.kind !== "expense_invoice",
   );
+  const supplierOptions = [
+    { value: "", label: "Aucun fournisseur" },
+    ...(suppliers ?? []).map((s) => ({ value: s._id, label: s.name })),
+  ];
 
   return (
     <Modal open onClose={onClose} title={project.name}>
@@ -419,26 +439,75 @@ function ProjectDetailModal({
           ) : null}
 
           {tab === "depenses" ? (
-            <Section title={`Dépenses (${expenses.length})`}>
-              {expenses.length === 0 ? (
-                <Muted>Aucune dépense.</Muted>
-              ) : (
-                <div className="divide-y divide-[var(--border)]">
-                  {expenses.map((x) => (
-                    <div key={x._id} className="flex items-center justify-between gap-3 py-3">
-                      <div>
-                        <p className="text-sm font-medium text-[var(--foreground)]">{x.label}</p>
-                        <p className="text-xs text-[var(--muted-foreground)]">
-                          {formatDate(x.date)}
-                          {x.supplierName ? ` · ${x.supplierName}` : ""}
-                        </p>
+            <div className="space-y-4">
+              <Section title={`Dépenses (${expenses.length})`}>
+                {expenses.length === 0 ? (
+                  <Muted>Aucune dépense.</Muted>
+                ) : (
+                  <div className="divide-y divide-[var(--border)]">
+                    {expenses.map((x) => (
+                      <div key={x._id} className="flex items-center justify-between gap-3 py-3">
+                        <div>
+                          <p className="text-sm font-medium text-[var(--foreground)]">{x.label}</p>
+                          <p className="text-xs text-[var(--muted-foreground)]">
+                            {formatDate(x.date)}
+                            {x.supplierName ? ` · ${x.supplierName}` : ""}
+                          </p>
+                        </div>
+                        <p className="text-sm font-semibold text-[var(--foreground)]">{formatEuros(x.amount)}</p>
                       </div>
-                      <p className="text-sm font-semibold text-[var(--foreground)]">{formatEuros(x.amount)}</p>
-                    </div>
-                  ))}
+                    ))}
+                  </div>
+                )}
+              </Section>
+
+              <Section title={`Bons de livraison (${deliveryDocuments.length})`}>
+                {deliveryDocuments.length === 0 ? (
+                  <Muted>Aucun bon de livraison.</Muted>
+                ) : (
+                  <div className="mb-3 flex flex-wrap gap-2">
+                    {deliveryDocuments.map((d) =>
+                      d.url ? (
+                        <a
+                          key={d._id}
+                          href={d.url}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="inline-flex max-w-full items-center gap-2 rounded-lg border border-[var(--border)] bg-[var(--card)] px-3 py-2 text-sm text-[var(--foreground)] hover:border-brand-300"
+                        >
+                          <Paperclip className="h-4 w-4 shrink-0 text-[var(--muted-foreground)]" />
+                          <span className="min-w-0">
+                            <span className="block truncate">{d.name}</span>
+                            {d.supplierName ? (
+                              <span className="block truncate text-xs text-[var(--muted-foreground)]">
+                                {d.supplierName}
+                              </span>
+                            ) : null}
+                          </span>
+                        </a>
+                      ) : null,
+                    )}
+                  </div>
+                )}
+                <div className="space-y-2">
+                  <Field label="Fournisseur" hint="Rattaché au bon de livraison">
+                    <AppSelect
+                      value={deliverySupplierId}
+                      onChange={setDeliverySupplierId}
+                      options={supplierOptions}
+                    />
+                  </Field>
+                  <DocumentPicker
+                    projectId={project._id}
+                    docs={deliveryDocs}
+                    onChange={setDeliveryDocs}
+                    kind="expense_delivery_note"
+                    supplierId={deliverySupplierId ? (deliverySupplierId as Id<"ptSuppliers">) : null}
+                    buttonLabel="Ajouter un bon de livraison"
+                  />
                 </div>
-              )}
-            </Section>
+              </Section>
+            </div>
           ) : null}
 
           {tab === "commercial" ? (
@@ -450,14 +519,6 @@ function ProjectDetailModal({
                 onChange={setQuoteDocs}
                 kind="expense_quote"
                 buttonLabel="Ajouter un devis"
-              />
-              <CommercialDocuments title="Bons de livraison fournisseur" documents={deliveryDocuments} />
-              <DocumentPicker
-                projectId={project._id}
-                docs={deliveryDocs}
-                onChange={setDeliveryDocs}
-                kind="expense_delivery_note"
-                buttonLabel="Ajouter un BL"
               />
               <CommercialDocuments title="Factures fournisseur" documents={supplierInvoiceDocuments} />
               <DocumentPicker

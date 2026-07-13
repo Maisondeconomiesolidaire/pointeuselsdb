@@ -35,6 +35,15 @@ export const bpMaterial = v.union(
   v.literal("Tout venant/DIB non triés"),
 );
 
+/** App « Bennes & Pro » — profil d'entreprise cliente. */
+export const bpCompanyType = v.union(
+  v.literal("artisan"),
+  v.literal("btp"),
+  v.literal("distributeur"),
+  v.literal("industrie"),
+  v.literal("autre"),
+);
+
 /** App « Bennes & Pro » — unités de mesure. */
 export const bpUnit = v.union(
   v.literal("kg"),
@@ -1358,10 +1367,61 @@ export default defineSchema(
     contactName: v.optional(v.string()),
     contactPhone: v.optional(v.string()),
     contactEmail: v.optional(v.string()),
+    /** Email dédié à la facturation (peut différer de l'email de contact). */
+    billingEmail: v.optional(v.string()),
+    /** Profil de l'entreprise (artisan, BTP, distributeur…). */
+    companyType: v.optional(bpCompanyType),
+    /** Précision libre quand `companyType === "autre"`. */
+    companyTypeOther: v.optional(v.string()),
+    /** Sujet Clerk du client propriétaire (compte espace client). */
+    ownerUserId: v.optional(v.string()),
+    /** Documents obligatoires marqués « Signé » par le staff. */
+    conventionSignedAt: v.optional(v.number()),
+    protocoleSignedAt: v.optional(v.number()),
     /** Client Stripe associé (facturation du DIB). */
     stripeCustomerId: v.optional(v.string()),
     createdAt: v.number(),
-  }).index("by_name", ["name"]),
+  })
+    .index("by_name", ["name"])
+    .index("by_owner", ["ownerUserId"]),
+
+  /** Documents rattachés à une entreprise (KBIS, RIB… ; client ↔ staff). */
+  bpCompanyDocuments: defineTable({
+    companyId: v.id("bpCompanies"),
+    storageId: v.id("_storage"),
+    name: v.string(),
+    docType: v.union(
+      v.literal("kbis"),
+      v.literal("rib"),
+      v.literal("assurance"),
+      v.literal("convention"),
+      v.literal("protocole"),
+      v.literal("autre"),
+    ),
+    mimeType: v.optional(v.string()),
+    /** Message de contexte optionnel joint au document. */
+    note: v.optional(v.string()),
+    /** Qui a déposé le document (portail client ou CRM). */
+    uploadedByRole: v.union(v.literal("client"), v.literal("staff")),
+    /** Horodatage de partage au client (docs staff visibles côté client). */
+    sharedWithClientAt: v.optional(v.number()),
+    /** Validation par le staff d'un document signé (convention, protocole…). */
+    validatedAt: v.optional(v.number()),
+    validatedBy: v.optional(v.string()),
+    createdBy: v.optional(v.string()),
+    createdAt: v.number(),
+  }).index("by_company", ["companyId"]),
+
+  /** Messagerie entre une entreprise cliente et le staff. */
+  bpCompanyMessages: defineTable({
+    companyId: v.id("bpCompanies"),
+    senderRole: v.union(v.literal("client"), v.literal("staff")),
+    senderName: v.string(),
+    body: v.string(),
+    readByClientAt: v.optional(v.number()),
+    readByStaffAt: v.optional(v.number()),
+    createdAt: v.number(),
+  }).index("by_company", ["companyId"]),
 
   /** Réglages Bennes & Pro (doc unique, key = "bennespro"). */
   bpSettings: defineTable({
@@ -1575,6 +1635,8 @@ export default defineSchema(
     timeEntryId: v.optional(v.id("ptTimeEntries")),
     expenseId: v.optional(v.id("ptExpenses")),
     invoiceId: v.optional(v.id("ptInvoices")),
+    /** Fournisseur rattaché (ex. bon de livraison, devis, facture fournisseur). */
+    supplierId: v.optional(v.id("ptSuppliers")),
     uploadedAt: v.number(),
     uploadedBy: v.optional(v.string()),
   }).index("by_project", ["projectId"]),

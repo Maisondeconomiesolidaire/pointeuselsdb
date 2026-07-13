@@ -208,14 +208,29 @@ export const listProjects = query({
       [INVOICES_PAGE_KEY, "read"],
       [INVOICES_PAGE_KEY, "create"],
     ]);
-    const projects = await ctx.db.query("ptProjects").order("desc").collect();
-    const clients = await ctx.db.query("ptClients").collect();
+    const [projects, clients, entries] = await Promise.all([
+      ctx.db.query("ptProjects").order("desc").collect(),
+      ctx.db.query("ptClients").collect(),
+      ctx.db.query("ptTimeEntries").collect(),
+    ]);
     const nameById = new Map(clients.map((c) => [c._id, c.name]));
+
+    // Reste à facturer par projet = pointages non encore marqués « facturé ».
+    const toBillByProject = new Map<string, number>();
+    for (const entry of entries) {
+      if ((entry.billingStatus ?? "a_facturer") === "facture") continue;
+      toBillByProject.set(
+        entry.projectId,
+        (toBillByProject.get(entry.projectId) ?? 0) + entry.totalCost,
+      );
+    }
+
     return projects
       .map((p) => ({
         ...p,
         clientName: nameById.get(p.clientId) ?? "—",
         travelRatePerKm: p.travelRatePerKm ?? DEFAULT_TRAVEL_RATE_PER_KM,
+        toBillPointed: round2(toBillByProject.get(p._id) ?? 0),
       }))
       .sort((a, b) => a.name.localeCompare(b.name, "fr"));
   },
@@ -330,6 +345,7 @@ export const projectSummary = query({
       documents.map(async (d) => ({
         ...d,
         kind: d.kind ?? "other",
+        supplierName: d.supplierId ? supplierName.get(d.supplierId) ?? null : null,
         url: await ctx.storage.getUrl(d.storageId),
       })),
     );
@@ -722,6 +738,7 @@ export const registerDocument = mutation({
       ),
     ),
     projectId: v.id("ptProjects"),
+    supplierId: v.optional(v.id("ptSuppliers")),
   },
   handler: async (ctx, args) => {
     await requireAnyCrmPermission(ctx, [
@@ -739,6 +756,7 @@ export const registerDocument = mutation({
       mimeType: args.mimeType,
       kind: args.kind ?? "other",
       projectId: args.projectId,
+      supplierId: args.supplierId,
       uploadedAt: Date.now(),
       uploadedBy: identity.email ?? undefined,
     });
@@ -842,13 +860,20 @@ export const clientSummary = query({
     const projectSummaries = projects.map((project) => {
       const projectEntries = entries.filter((entry) => entry.projectId === project._id);
       const projectInvoices = invoices.filter((invoice) => invoice.projectId === project._id);
+      const billedPointed = round2(
+        projectEntries
+          .filter((entry) => entry.billingStatus === "facture")
+          .reduce((sum, entry) => sum + entry.totalCost, 0),
+      );
+      const totalPointed = round2(
+        projectEntries.reduce((sum, entry) => sum + entry.totalCost, 0),
+      );
       return {
         ...project,
         travelRatePerKm: project.travelRatePerKm ?? DEFAULT_TRAVEL_RATE_PER_KM,
         entriesCount: projectEntries.length,
-        totalPointed: round2(
-          projectEntries.reduce((sum, entry) => sum + entry.totalCost, 0),
-        ),
+        totalPointed,
+        toBillPointed: round2(totalPointed - billedPointed),
         invoiced: round2(
           projectInvoices.reduce((sum, invoice) => sum + invoice.amount, 0),
         ),

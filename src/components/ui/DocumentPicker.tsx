@@ -27,6 +27,7 @@ export function DocumentPicker({
   docs,
   onChange,
   kind = "other",
+  supplierId = null,
   buttonLabel = "Ajouter des documents",
   disabledLabel = "Sélectionnez d'abord un projet",
 }: {
@@ -34,6 +35,7 @@ export function DocumentPicker({
   docs: PickedDoc[];
   onChange: (docs: PickedDoc[]) => void;
   kind?: DocumentKind;
+  supplierId?: Id<"ptSuppliers"> | null;
   buttonLabel?: string;
   disabledLabel?: string;
 }) {
@@ -55,6 +57,7 @@ export function DocumentPicker({
           mimeType: file.type || undefined,
           kind,
           projectId,
+          supplierId: supplierId ?? undefined,
         });
         added.push({ id, name: file.name });
       }

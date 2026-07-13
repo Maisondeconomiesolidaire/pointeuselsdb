@@ -231,6 +231,7 @@ function ExpenseForm({ onClose }: { onClose: () => void }) {
             docs={quoteDocs}
             onChange={setQuoteDocs}
             kind="expense_quote"
+            supplierId={supplierId ? (supplierId as Id<"ptSuppliers">) : null}
             buttonLabel="Ajouter un devis"
           />
         </Field>
@@ -240,6 +241,7 @@ function ExpenseForm({ onClose }: { onClose: () => void }) {
             docs={deliveryDocs}
             onChange={setDeliveryDocs}
             kind="expense_delivery_note"
+            supplierId={supplierId ? (supplierId as Id<"ptSuppliers">) : null}
             buttonLabel="Ajouter un BL"
           />
         </Field>
@@ -249,6 +251,7 @@ function ExpenseForm({ onClose }: { onClose: () => void }) {
             docs={invoiceDocs}
             onChange={setInvoiceDocs}
             kind="expense_invoice"
+            supplierId={supplierId ? (supplierId as Id<"ptSuppliers">) : null}
             buttonLabel="Ajouter une facture fournisseur"
           />
         </Field>
