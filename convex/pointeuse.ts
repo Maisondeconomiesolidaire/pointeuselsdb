@@ -37,6 +37,24 @@ const SUPPLIERS_PAGE_KEY = "pointeuse:fournisseurs";
 const EXPENSES_PAGE_KEY = "pointeuse:depenses";
 const INVOICES_PAGE_KEY = "pointeuse:factures";
 
+function normalizeBillingStatus(
+  status: string | undefined | null,
+): "a_facturer" | "facture" {
+  if (!status) return "a_facturer";
+  const normalized = status
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .trim()
+    .toLowerCase();
+  return normalized === "facture" || normalized === "facturee" || normalized === "billed"
+    ? "facture"
+    : "a_facturer";
+}
+
+function isEntryBilled(status: string | undefined | null) {
+  return normalizeBillingStatus(status) === "facture";
+}
+
 /* ─── Salariés ────────────────────────────────────────────────────────────── */
 
 const employeeStatus = v.union(
@@ -218,7 +236,7 @@ export const listProjects = query({
     // Reste à facturer par projet = pointages non encore marqués « facturé ».
     const toBillByProject = new Map<string, number>();
     for (const entry of entries) {
-      if ((entry.billingStatus ?? "a_facturer") === "facture") continue;
+      if (isEntryBilled(entry.billingStatus)) continue;
       toBillByProject.set(
         entry.projectId,
         (toBillByProject.get(entry.projectId) ?? 0) + entry.totalCost,
@@ -332,7 +350,7 @@ export const projectSummary = query({
     const travelCost = entries.reduce((s, e) => s + e.travelCost, 0);
     const totalPointed = entries.reduce((s, e) => s + e.totalCost, 0);
     const billedPointed = entries
-      .filter((e) => e.billingStatus === "facture")
+      .filter((e) => isEntryBilled(e.billingStatus))
       .reduce((s, e) => s + e.totalCost, 0);
     const totalExpenses = expenses.reduce((s, e) => s + e.amount, 0);
     const invoiced = invoices.reduce((s, i) => s + i.amount, 0);
@@ -359,7 +377,7 @@ export const projectSummary = query({
       client,
       entries: entries.map((entry) => ({
         ...entry,
-        billingStatus: entry.billingStatus ?? "a_facturer",
+        billingStatus: normalizeBillingStatus(entry.billingStatus),
         lines: entry.lines.map((line) => ({
           ...line,
           employeeName: employeeName.get(line.employeeId) ?? "—",
@@ -473,7 +491,7 @@ export const listTimeEntries = query({
 
     return entries.map((e) => ({
       ...e,
-      billingStatus: e.billingStatus ?? "a_facturer",
+      billingStatus: normalizeBillingStatus(e.billingStatus),
       projectName: projectName.get(e.projectId) ?? "—",
       clientName: clientName.get(e.clientId) ?? "—",
       lines: e.lines.map((l) => ({
@@ -826,7 +844,7 @@ export const getTimeEntry = query({
 
     return {
       ...entry,
-      billingStatus: entry.billingStatus ?? "a_facturer",
+      billingStatus: normalizeBillingStatus(entry.billingStatus),
       projectName: project?.name ?? "—",
       clientName: client?.name ?? "—",
       lines: entry.lines.map((line) => ({
@@ -862,7 +880,7 @@ export const clientSummary = query({
       const projectInvoices = invoices.filter((invoice) => invoice.projectId === project._id);
       const billedPointed = round2(
         projectEntries
-          .filter((entry) => entry.billingStatus === "facture")
+          .filter((entry) => isEntryBilled(entry.billingStatus))
           .reduce((sum, entry) => sum + entry.totalCost, 0),
       );
       const totalPointed = round2(
@@ -896,7 +914,7 @@ export const clientSummary = query({
     );
     const billedPointed = round2(
       clientEntries
-        .filter((entry) => entry.billingStatus === "facture")
+        .filter((entry) => isEntryBilled(entry.billingStatus))
         .reduce((sum, entry) => sum + entry.totalCost, 0),
     );
     const totalExpenses = 0;
@@ -976,10 +994,10 @@ export const dashboard = query({
     ]);
     const totalPointed = entries.reduce((s, e) => s + e.totalCost, 0);
     const billedPointed = entries
-      .filter((e) => e.billingStatus === "facture")
+      .filter((e) => isEntryBilled(e.billingStatus))
       .reduce((s, e) => s + e.totalCost, 0);
     const toBillCount = entries.filter(
-      (e) => (e.billingStatus ?? "a_facturer") !== "facture",
+      (e) => !isEntryBilled(e.billingStatus),
     ).length;
     const invoiced = invoices.reduce((s, i) => s + i.amount, 0);
     const paid = invoices
