@@ -121,6 +121,7 @@ function ProjectList({ initialProjectId }: { initialProjectId?: Id<"ptProjects">
   const navigate = useNavigate();
   const [creating, setCreating] = useState(false);
   const [search, setSearch] = useState("");
+  const [sortBy, setSortBy] = useState("amount_desc");
   const [selectedProjectId, setSelectedProjectId] = useState<Id<"ptProjects"> | null>(
     initialProjectId ?? null,
   );
@@ -129,19 +130,47 @@ function ProjectList({ initialProjectId }: { initialProjectId?: Id<"ptProjects">
     setSelectedProjectId(initialProjectId ?? null);
   }, [initialProjectId]);
 
-  const filteredProjects = useMemo(
-    () =>
-      (projects ?? []).filter((p) =>
-        matchesSearch(search, [
-          p.name,
-          p.clientName,
-          p.address,
-          p.postalCode,
-          p.city,
-        ]),
-      ),
-    [projects, search],
+  const sortOptions = useMemo(
+    () => [
+      { value: "amount_desc", label: "Montant le plus eleve" },
+      { value: "amount_asc", label: "Montant le plus faible" },
+      { value: "recent", label: "Plus recent" },
+      { value: "oldest", label: "Plus ancien" },
+      { value: "name_asc", label: "Nom A-Z" },
+      { value: "name_desc", label: "Nom Z-A" },
+    ],
+    [],
   );
+
+  const filteredProjects = useMemo(() => {
+    const filtered = (projects ?? []).filter((p) =>
+      matchesSearch(search, [
+        p.name,
+        p.clientName,
+        p.address,
+        p.postalCode,
+        p.city,
+      ]),
+    );
+
+    return [...filtered].sort((a, b) => {
+      switch (sortBy) {
+        case "amount_asc":
+          return (a.toBillPointed ?? 0) - (b.toBillPointed ?? 0);
+        case "recent":
+          return (b.createdAt ?? b._creationTime ?? 0) - (a.createdAt ?? a._creationTime ?? 0);
+        case "oldest":
+          return (a.createdAt ?? a._creationTime ?? 0) - (b.createdAt ?? b._creationTime ?? 0);
+        case "name_asc":
+          return a.name.localeCompare(b.name, "fr");
+        case "name_desc":
+          return b.name.localeCompare(a.name, "fr");
+        case "amount_desc":
+        default:
+          return (b.toBillPointed ?? 0) - (a.toBillPointed ?? 0);
+      }
+    });
+  }, [projects, search, sortBy]);
 
   return (
     <div>
@@ -170,12 +199,17 @@ function ProjectList({ initialProjectId }: { initialProjectId?: Id<"ptProjects">
         />
       ) : (
         <>
-          <div className="mb-4 max-w-md">
-            <SearchInput
-              value={search}
-              onChange={setSearch}
-              placeholder="Rechercher un projet, client, ville…"
-            />
+          <div className="mb-4 grid gap-3 lg:grid-cols-[minmax(0,1fr)_280px]">
+            <div className="max-w-md">
+              <SearchInput
+                value={search}
+                onChange={setSearch}
+                placeholder="Rechercher un projet, client, ville…"
+              />
+            </div>
+            <Field label="Tri">
+              <AppSelect value={sortBy} onChange={setSortBy} options={sortOptions} />
+            </Field>
           </div>
           {filteredProjects.length === 0 ? (
             <EmptyState
