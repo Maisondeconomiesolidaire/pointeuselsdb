@@ -15,7 +15,7 @@ import { api } from "../../convex/_generated/api";
 import type { Id } from "../../convex/_generated/dataModel";
 import { PageHeader, Badge } from "../components/ui/PageHeader";
 import { Button } from "../components/ui/Button";
-import { AppSelect, Field, Input, Textarea } from "../components/ui/Field";
+import { AppSelect, DatePicker, Field, Input, Textarea } from "../components/ui/Field";
 import { Modal } from "../components/ui/Modal";
 import { EmptyState } from "../components/ui/EmptyState";
 import { FullSpinner } from "../components/ui/Spinner";
@@ -24,8 +24,8 @@ import { SearchInput, matchesSearch } from "../components/ui/SearchInput";
 import { DocumentPicker, type PickedDoc } from "../components/ui/DocumentPicker";
 import { PointageDetailModal } from "../components/pointeuse/PointageDetailModal";
 import { cn } from "../lib/cn";
-import { formatDate, formatEuros } from "../lib/format";
-import { CLIENT_TYPES, clientTypeMeta, PROJECT_STATUSES, projectStatusMeta } from "../lib/labels";
+import { formatDate, formatEuros, parseDateInput, toDateInputValue } from "../lib/format";
+import { CLIENT_TYPES, clientTypeMeta, INVOICE_STATUSES, PROJECT_STATUSES, projectStatusMeta } from "../lib/labels";
 
 type Project = {
   _id: Id<"ptProjects">;
@@ -466,9 +466,11 @@ function ProjectDetailModal({
   const [tab, setTab] = useState<ProjectTab>("details");
   const [quoteDocs, setQuoteDocs] = useState<PickedDoc[]>([]);
   const [deliveryDocs, setDeliveryDocs] = useState<PickedDoc[]>([]);
-  const [invoiceDocs, setInvoiceDocs] = useState<PickedDoc[]>([]);
   const [deliverySupplierId, setDeliverySupplierId] = useState<string>("");
   const [selectedEntryId, setSelectedEntryId] = useState<Id<"ptTimeEntries"> | null>(null);
+  const [creatingExpense, setCreatingExpense] = useState(false);
+  const [creatingInvoice, setCreatingInvoice] = useState(false);
+  const [uploadingQuote, setUploadingQuote] = useState(false);
 
   if (summary === undefined) {
     return (
@@ -497,12 +499,14 @@ function ProjectDetailModal({
   ];
   const quoteDocuments = documents.filter((d) => d.kind === "expense_quote");
   const deliveryDocuments = documents.filter((d) => d.kind === "expense_delivery_note");
+  const lsdbInvoiceDocuments = documents.filter((d) => d.kind === "invoice_pdf");
   const supplierInvoiceDocuments = documents.filter((d) => d.kind === "expense_invoice");
   const otherDocuments = documents.filter(
     (d) =>
       d.kind !== "expense_quote" &&
       d.kind !== "expense_delivery_note" &&
-      d.kind !== "expense_invoice",
+      d.kind !== "expense_invoice" &&
+      d.kind !== "invoice_pdf",
   );
   const supplierOptions = [
     { value: "", label: "Aucun fournisseur" },
@@ -663,6 +667,11 @@ function ProjectDetailModal({
 
           {tab === "depenses" ? (
             <div className="space-y-4">
+              <div className="flex justify-end">
+                <Button onClick={() => setCreatingExpense(true)}>
+                  <Plus className="h-4 w-4" /> Nouvelle dépense
+                </Button>
+              </div>
               <Section title={`Dépenses (${expenses.length})`}>
                 {expenses.length === 0 ? (
                   <Muted>Aucune dépense.</Muted>
@@ -730,29 +739,25 @@ function ProjectDetailModal({
                   />
                 </div>
               </Section>
+
+              <CommercialDocuments title="Factures fournisseur" documents={supplierInvoiceDocuments} />
             </div>
           ) : null}
 
           {tab === "commercial" ? (
             <div className="space-y-4">
-              <CommercialDocuments title="Devis fournisseur" documents={quoteDocuments} />
-              <DocumentPicker
-                projectId={project._id}
-                docs={quoteDocs}
-                onChange={setQuoteDocs}
-                kind="expense_quote"
-                buttonLabel="Ajouter un devis"
-              />
-              <CommercialDocuments title="Factures fournisseur" documents={supplierInvoiceDocuments} />
-              <DocumentPicker
-                projectId={project._id}
-                docs={invoiceDocs}
-                onChange={setInvoiceDocs}
-                kind="expense_invoice"
-                buttonLabel="Ajouter une facture fournisseur"
-              />
+              <div className="flex flex-wrap justify-end gap-2">
+                <Button variant="secondary" onClick={() => setUploadingQuote(true)}>
+                  <Plus className="h-4 w-4" /> Ajouter un devis LSDB
+                </Button>
+                <Button onClick={() => setCreatingInvoice(true)}>
+                  <Plus className="h-4 w-4" /> Nouvelle facture LSDB
+                </Button>
+              </div>
+              <CommercialDocuments title="Devis LSDB" documents={quoteDocuments} />
+              <CommercialDocuments title="PDF de factures LSDB" documents={lsdbInvoiceDocuments} />
               {invoices.length > 0 ? (
-                <Section title={`Factures client (${invoices.length})`}>
+                <Section title={`Factures LSDB (${invoices.length})`}>
                   <div className="divide-y divide-[var(--border)]">
                     {invoices.map((i) => (
                       <div key={i._id} className="flex items-center justify-between py-2.5">
@@ -777,6 +782,299 @@ function ProjectDetailModal({
       {selectedEntryId ? (
         <PointageDetailModal entryId={selectedEntryId} onClose={() => setSelectedEntryId(null)} />
       ) : null}
+      {creatingExpense ? (
+        <ProjectExpenseForm project={project as Project} onClose={() => setCreatingExpense(false)} />
+      ) : null}
+      {creatingInvoice ? (
+        <ProjectInvoiceForm project={project as Project} onClose={() => setCreatingInvoice(false)} />
+      ) : null}
+      {uploadingQuote ? (
+        <ProjectQuoteUploadModal
+          project={project as Project}
+          docs={quoteDocs}
+          onDocsChange={setQuoteDocs}
+          onClose={() => setUploadingQuote(false)}
+        />
+      ) : null}
+    </Modal>
+  );
+}
+
+function ProjectQuoteUploadModal({
+  project,
+  docs,
+  onDocsChange,
+  onClose,
+}: {
+  project: Project;
+  docs: PickedDoc[];
+  onDocsChange: (docs: PickedDoc[]) => void;
+  onClose: () => void;
+}) {
+  return (
+    <Modal open onClose={onClose} title="Ajouter un devis LSDB" className="sm:h-auto sm:max-w-lg">
+      <div className="space-y-4">
+        <p className="text-sm text-[var(--muted-foreground)]">
+          Le devis sera rattaché au projet <strong className="text-[var(--foreground)]">{project.name}</strong>.
+        </p>
+        <Field label="Document du devis">
+          <DocumentPicker
+            projectId={project._id}
+            docs={docs}
+            onChange={onDocsChange}
+            kind="expense_quote"
+            buttonLabel="Téléverser un devis LSDB"
+          />
+        </Field>
+        <div className="flex justify-end">
+          <Button variant="secondary" onClick={onClose}>
+            Fermer
+          </Button>
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
+function ProjectExpenseForm({
+  project,
+  onClose,
+}: {
+  project: Project;
+  onClose: () => void;
+}) {
+  const suppliers = useQuery(api.pointeuse.listSuppliers);
+  const create = useMutation(api.pointeuse.createExpense);
+  const [label, setLabel] = useState("");
+  const [amount, setAmount] = useState("");
+  const [date, setDate] = useState(toDateInputValue(Date.now()));
+  const [supplierId, setSupplierId] = useState("");
+  const [category, setCategory] = useState("");
+  const [quoteDocs, setQuoteDocs] = useState<PickedDoc[]>([]);
+  const [deliveryDocs, setDeliveryDocs] = useState<PickedDoc[]>([]);
+  const [invoiceDocs, setInvoiceDocs] = useState<PickedDoc[]>([]);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const supplierOptions = useMemo(
+    () => [
+      { value: "", label: "Sélectionner" },
+      ...(suppliers ?? []).map((supplier) => ({ value: supplier._id, label: supplier.name })),
+    ],
+    [suppliers],
+  );
+
+  async function submit() {
+    if (!supplierId || !label.trim() || !amount) {
+      setError("Le fournisseur, le libellé et le montant sont obligatoires.");
+      return;
+    }
+    setSaving(true);
+    setError(null);
+    try {
+      await create({
+        label,
+        amount: Number(amount) || 0,
+        date: parseDateInput(date),
+        projectId: project._id,
+        supplierId: supplierId as Id<"ptSuppliers">,
+        category: category || undefined,
+        documentIds: [...quoteDocs, ...deliveryDocs, ...invoiceDocs].map((doc) => doc.id),
+      });
+      onClose();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Erreur");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <Modal open onClose={onClose} title="Nouvelle dépense" className="sm:h-auto sm:max-w-lg">
+      <div className="space-y-4">
+        <Field label="Projet">
+          <Input value={project.name} readOnly />
+        </Field>
+        <div className="grid gap-3 sm:grid-cols-2">
+          <Field label="Fournisseur" required>
+            <AppSelect value={supplierId} onChange={setSupplierId} options={supplierOptions} />
+          </Field>
+          <Field label="Date" required>
+            <DatePicker value={date} onChange={setDate} />
+          </Field>
+        </div>
+        <div className="grid gap-3 sm:grid-cols-2">
+          <Field label="Dépense" required>
+            <Input
+              value={label}
+              onChange={(e) => setLabel(e.target.value)}
+              placeholder="Matériaux, location, sous-traitance…"
+            />
+          </Field>
+          <Field label="Montant (€)" required>
+            <Input
+              type="number"
+              min="0"
+              step="0.01"
+              value={amount}
+              onChange={(e) => setAmount(e.target.value)}
+            />
+          </Field>
+        </div>
+        <Field label="Catégorie">
+          <Input
+            value={category}
+            onChange={(e) => setCategory(e.target.value)}
+            placeholder="Matériaux, location, carburant…"
+          />
+        </Field>
+        <Field label="Devis fournisseur">
+          <DocumentPicker
+            projectId={project._id}
+            docs={quoteDocs}
+            onChange={setQuoteDocs}
+            kind="expense_quote"
+            buttonLabel="Ajouter un devis fournisseur"
+          />
+        </Field>
+        <Field label="BL fournisseur">
+          <DocumentPicker
+            projectId={project._id}
+            docs={deliveryDocs}
+            onChange={setDeliveryDocs}
+            kind="expense_delivery_note"
+            buttonLabel="Ajouter un bon de livraison"
+          />
+        </Field>
+        <Field label="Facture fournisseur">
+          <DocumentPicker
+            projectId={project._id}
+            docs={invoiceDocs}
+            onChange={setInvoiceDocs}
+            kind="expense_invoice"
+            buttonLabel="Ajouter une facture fournisseur"
+          />
+        </Field>
+        {error ? <p className="text-sm text-red-600">{error}</p> : null}
+        <div className="flex flex-col-reverse gap-2 pt-2 sm:flex-row sm:justify-end">
+          <Button variant="secondary" onClick={onClose}>
+            Annuler
+          </Button>
+          <Button onClick={submit} disabled={saving}>
+            {saving ? "Enregistrement…" : "Enregistrer"}
+          </Button>
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
+function ProjectInvoiceForm({
+  project,
+  onClose,
+}: {
+  project: Project;
+  onClose: () => void;
+}) {
+  const create = useMutation(api.pointeuse.createInvoice);
+  const [number, setNumber] = useState("");
+  const [amount, setAmount] = useState("");
+  const [status, setStatus] = useState<"brouillon" | "envoyee" | "payee" | "en_retard">("brouillon");
+  const [issuedAt, setIssuedAt] = useState(toDateInputValue(Date.now()));
+  const [dueAt, setDueAt] = useState("");
+  const [notes, setNotes] = useState("");
+  const [docs, setDocs] = useState<PickedDoc[]>([]);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const statusOptions = useMemo(
+    () => INVOICE_STATUSES.map((item) => ({ value: item.value, label: item.label })),
+    [],
+  );
+
+  async function submit() {
+    if (!number.trim() || !amount) {
+      setError("Le numéro et le montant sont obligatoires.");
+      return;
+    }
+    setSaving(true);
+    setError(null);
+    try {
+      await create({
+        projectId: project._id,
+        number,
+        amount: Number(amount) || 0,
+        status,
+        issuedAt: parseDateInput(issuedAt),
+        dueAt: dueAt ? parseDateInput(dueAt) : undefined,
+        notes: notes || undefined,
+        documentIds: docs.map((doc) => doc.id),
+      });
+      onClose();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Erreur");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <Modal open onClose={onClose} title="Nouvelle facture LSDB" className="sm:h-auto sm:max-w-lg">
+      <div className="space-y-4">
+        <Field label="Projet">
+          <Input value={project.name} readOnly />
+        </Field>
+        <div className="grid gap-3 sm:grid-cols-2">
+          <Field label="Numéro" required>
+            <Input value={number} onChange={(e) => setNumber(e.target.value)} />
+          </Field>
+          <Field label="Montant (€)" required>
+            <Input
+              type="number"
+              min="0"
+              step="0.01"
+              value={amount}
+              onChange={(e) => setAmount(e.target.value)}
+            />
+          </Field>
+        </div>
+        <div className="grid gap-3 sm:grid-cols-2">
+          <Field label="Date d'émission" required>
+            <DatePicker value={issuedAt} onChange={setIssuedAt} />
+          </Field>
+          <Field label="Échéance">
+            <DatePicker value={dueAt} onChange={setDueAt} placeholder="Aucune échéance" />
+          </Field>
+        </div>
+        <Field label="Statut">
+          <AppSelect
+            value={status}
+            onChange={(value) => setStatus(value as "brouillon" | "envoyee" | "payee" | "en_retard")}
+            options={statusOptions}
+          />
+        </Field>
+        <Field label="PDF de la facture LSDB">
+          <DocumentPicker
+            projectId={project._id}
+            docs={docs}
+            onChange={setDocs}
+            kind="invoice_pdf"
+            buttonLabel="Ajouter le PDF"
+          />
+        </Field>
+        <Field label="Notes">
+          <Textarea value={notes} onChange={(e) => setNotes(e.target.value)} />
+        </Field>
+        {error ? <p className="text-sm text-red-600">{error}</p> : null}
+        <div className="flex flex-col-reverse gap-2 pt-2 sm:flex-row sm:justify-end">
+          <Button variant="secondary" onClick={onClose}>
+            Annuler
+          </Button>
+          <Button onClick={submit} disabled={saving}>
+            {saving ? "Enregistrement…" : "Enregistrer"}
+          </Button>
+        </div>
+      </div>
     </Modal>
   );
 }
