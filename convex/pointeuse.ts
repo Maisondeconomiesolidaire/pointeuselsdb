@@ -37,6 +37,24 @@ const SUPPLIERS_PAGE_KEY = "pointeuse:fournisseurs";
 const EXPENSES_PAGE_KEY = "pointeuse:depenses";
 const INVOICES_PAGE_KEY = "pointeuse:factures";
 
+function normalizeBillingStatus(
+  status: string | undefined | null,
+): "a_facturer" | "facture" {
+  if (!status) return "a_facturer";
+  const normalized = status
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .trim()
+    .toLowerCase();
+  return normalized === "facture" || normalized === "facturee" || normalized === "billed"
+    ? "facture"
+    : "a_facturer";
+}
+
+function isEntryBilled(status: string | undefined | null) {
+  return normalizeBillingStatus(status) === "facture";
+}
+
 /* ─── Salariés ────────────────────────────────────────────────────────────── */
 
 const employeeStatus = v.union(
@@ -100,6 +118,58 @@ export const updateEmployee = mutation({
       hourlyRate: patch.hourlyRate,
       active: patch.active,
     });
+  },
+});
+
+export const updateEmployeeRateAndRecomputeEntries = mutation({
+  args: {
+    employeeId: v.id("ptEmployees"),
+    hourlyRate: v.number(),
+  },
+  handler: async (ctx, { employeeId, hourlyRate }) => {
+    await requireCrmPermission(ctx, EMPLOYEES_PAGE_KEY, "update");
+    await requireCrmPermission(ctx, TIME_ENTRIES_PAGE_KEY, "update");
+
+    const employee = await ctx.db.get(employeeId);
+    if (!employee) throw new Error("Salarié introuvable.");
+
+    await ctx.db.patch(employeeId, { hourlyRate });
+
+    const entries = await ctx.db.query("ptTimeEntries").collect();
+    let updatedEntries = 0;
+
+    for (const entry of entries) {
+      let changed = false;
+      const lines = entry.lines.map((line) => {
+        if (line.employeeId !== employeeId) return line;
+        changed = true;
+        const cost = round2(line.hours * hourlyRate);
+        return {
+          ...line,
+          hourlyRate,
+          cost,
+        };
+      });
+
+      if (!changed) continue;
+
+      const laborCost = round2(lines.reduce((sum, line) => sum + line.cost, 0));
+      const totalCost = round2(laborCost + entry.travelCost);
+
+      await ctx.db.patch(entry._id, {
+        lines,
+        laborCost,
+        totalCost,
+      });
+      updatedEntries += 1;
+    }
+
+    return {
+      employeeId,
+      employeeName: `${employee.firstName} ${employee.lastName}`.trim(),
+      hourlyRate,
+      updatedEntries,
+    };
   },
 });
 
@@ -246,7 +316,7 @@ export const listProjects = query({
       };
       current.entriesCount += 1;
       current.totalPointed += entry.totalCost;
-      if ((entry.billingStatus ?? "a_facturer") === "facture") {
+      if (isEntryBilled(entry.billingStatus)) {
         current.billedPointed += entry.totalCost;
       } else {
         current.toBillPointed += entry.totalCost;
@@ -373,7 +443,7 @@ export const projectSummary = query({
     const travelCost = entries.reduce((s, e) => s + e.travelCost, 0);
     const totalPointed = entries.reduce((s, e) => s + e.totalCost, 0);
     const billedPointed = entries
-      .filter((e) => e.billingStatus === "facture")
+      .filter((e) => isEntryBilled(e.billingStatus))
       .reduce((s, e) => s + e.totalCost, 0);
     const totalExpenses = expenses.reduce((s, e) => s + e.amount, 0);
     const invoiced = invoices.reduce((s, i) => s + i.amount, 0);
@@ -386,6 +456,7 @@ export const projectSummary = query({
       documents.map(async (d) => ({
         ...d,
         kind: d.kind ?? "other",
+        supplierName: d.supplierId ? supplierName.get(d.supplierId) ?? null : null,
         url: await ctx.storage.getUrl(d.storageId),
       })),
     );
@@ -405,7 +476,7 @@ export const projectSummary = query({
         : null,
       entries: entries.map((entry) => ({
         ...entry,
-        billingStatus: entry.billingStatus ?? "a_facturer",
+        billingStatus: normalizeBillingStatus(entry.billingStatus),
         lines: entry.lines.map((line) => ({
           ...line,
           employeeName: employeeName.get(line.employeeId) ?? "—",
@@ -519,7 +590,7 @@ export const listTimeEntries = query({
 
     return entries.map((e) => ({
       ...e,
-      billingStatus: e.billingStatus ?? "a_facturer",
+      billingStatus: normalizeBillingStatus(e.billingStatus),
       projectName: projectName.get(e.projectId) ?? "—",
       clientName: clientName.get(e.clientId) ?? "—",
       lines: e.lines.map((l) => ({
@@ -784,6 +855,7 @@ export const registerDocument = mutation({
       ),
     ),
     projectId: v.id("ptProjects"),
+    supplierId: v.optional(v.id("ptSuppliers")),
   },
   handler: async (ctx, args) => {
     await requireAnyCrmPermission(ctx, [
@@ -801,6 +873,7 @@ export const registerDocument = mutation({
       mimeType: args.mimeType,
       kind: args.kind ?? "other",
       projectId: args.projectId,
+      supplierId: args.supplierId,
       uploadedAt: Date.now(),
       uploadedBy: identity.email ?? undefined,
     });
@@ -870,7 +943,7 @@ export const getTimeEntry = query({
 
     return {
       ...entry,
-      billingStatus: entry.billingStatus ?? "a_facturer",
+      billingStatus: normalizeBillingStatus(entry.billingStatus),
       projectName: project?.name ?? "—",
       clientName: client?.name ?? "—",
       lines: entry.lines.map((line) => ({
@@ -904,14 +977,20 @@ export const clientSummary = query({
     const projectSummaries = projects.map((project) => {
       const projectEntries = entries.filter((entry) => entry.projectId === project._id);
       const projectInvoices = invoices.filter((invoice) => invoice.projectId === project._id);
+      const billedPointed = round2(
+        projectEntries
+          .filter((entry) => isEntryBilled(entry.billingStatus))
+          .reduce((sum, entry) => sum + entry.totalCost, 0),
+      );
+      const totalPointed = round2(
+        projectEntries.reduce((sum, entry) => sum + entry.totalCost, 0),
+      );
       return {
         ...project,
         travelRatePerKm: project.travelRatePerKm ?? DEFAULT_TRAVEL_RATE_PER_KM,
-        clientType: client.clientType ?? "externe",
         entriesCount: projectEntries.length,
-        totalPointed: round2(
-          projectEntries.reduce((sum, entry) => sum + entry.totalCost, 0),
-        ),
+        totalPointed,
+        toBillPointed: round2(totalPointed - billedPointed),
         invoiced: round2(
           projectInvoices.reduce((sum, invoice) => sum + invoice.amount, 0),
         ),
@@ -934,7 +1013,7 @@ export const clientSummary = query({
     );
     const billedPointed = round2(
       clientEntries
-        .filter((entry) => entry.billingStatus === "facture")
+        .filter((entry) => isEntryBilled(entry.billingStatus))
         .reduce((sum, entry) => sum + entry.totalCost, 0),
     );
     const totalExpenses = 0;
@@ -1017,10 +1096,10 @@ export const dashboard = query({
     ]);
     const totalPointed = entries.reduce((s, e) => s + e.totalCost, 0);
     const billedPointed = entries
-      .filter((e) => e.billingStatus === "facture")
+      .filter((e) => isEntryBilled(e.billingStatus))
       .reduce((s, e) => s + e.totalCost, 0);
     const toBillCount = entries.filter(
-      (e) => (e.billingStatus ?? "a_facturer") !== "facture",
+      (e) => !isEntryBilled(e.billingStatus),
     ).length;
     const invoiced = invoices.reduce((s, i) => s + i.amount, 0);
     const paid = invoices
