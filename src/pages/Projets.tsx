@@ -176,7 +176,7 @@ function ProjectList({ initialProjectId }: { initialProjectId?: Id<"ptProjects">
   }, [activeClientId, projects, search, sortBy, typeFilter]);
 
   const matchingClients = useMemo(() => {
-    if (!search.trim() || activeClientId) return [];
+    if (!search.trim()) return [];
     return (clients ?? [])
       .filter((client) => {
         if (typeFilter !== "all" && client.clientType !== typeFilter) return false;
@@ -189,6 +189,12 @@ function ProjectList({ initialProjectId }: { initialProjectId?: Id<"ptProjects">
     () => (clients ?? []).find((client) => client._id === activeClientId) ?? null,
     [activeClientId, clients],
   );
+
+  useEffect(() => {
+    if (!selectedClient) return;
+    if (search.trim() === selectedClient.name) return;
+    setActiveClientId(null);
+  }, [search, selectedClient]);
 
   const summary = useMemo(() => {
     let totalPointed = 0;
@@ -260,24 +266,14 @@ function ProjectList({ initialProjectId }: { initialProjectId?: Id<"ptProjects">
               <div className="max-w-md">
                 <SearchInput
                   value={search}
-                  onChange={setSearch}
+                  onChange={(value) => setSearch(value)}
                   placeholder="Rechercher un projet, client, ville…"
                 />
               </div>
               {selectedClient ? (
-                <div className="flex flex-wrap items-center gap-2">
-                  <button
-                    type="button"
-                    onClick={() => setActiveClientId(null)}
-                    className="inline-flex items-center gap-2 rounded-full border border-[var(--border)] bg-[var(--card)] px-3 py-1.5 text-sm text-[var(--foreground)]"
-                  >
-                    {selectedClient.name}
-                    <span className="text-[var(--muted-foreground)]">×</span>
-                  </button>
-                  <Badge tone={clientTypeMeta(selectedClient.clientType).tone}>
-                    {clientTypeMeta(selectedClient.clientType).label}
-                  </Badge>
-                </div>
+                <Badge tone={clientTypeMeta(selectedClient.clientType).tone}>
+                  {clientTypeMeta(selectedClient.clientType).label}
+                </Badge>
               ) : null}
               {matchingClients.length > 0 ? (
                 <div className="max-w-xl rounded-2xl border border-[var(--border)] bg-[var(--card)] p-2 shadow-sm">
@@ -289,7 +285,10 @@ function ProjectList({ initialProjectId }: { initialProjectId?: Id<"ptProjects">
                       <button
                         key={client._id}
                         type="button"
-                        onClick={() => setActiveClientId(client._id)}
+                        onClick={() => {
+                          setActiveClientId(client._id);
+                          setSearch(client.name);
+                        }}
                         className="flex w-full items-center justify-between gap-3 rounded-xl px-3 py-2 text-left transition hover:bg-[var(--accent)]"
                       >
                         <span className="min-w-0">
