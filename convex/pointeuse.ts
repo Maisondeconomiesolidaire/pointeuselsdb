@@ -185,6 +185,7 @@ export const deleteEmployee = mutation({
 
 const clientFields = {
   name: v.string(),
+  clientType: v.union(v.literal("interne"), v.literal("externe")),
   contactName: v.optional(v.string()),
   email: v.optional(v.string()),
   phone: v.optional(v.string()),
@@ -203,7 +204,12 @@ export const listClients = query({
       [PROJECTS_PAGE_KEY, "update"],
     ]);
     const clients = await ctx.db.query("ptClients").order("desc").collect();
-    return clients.sort((a, b) => a.name.localeCompare(b.name, "fr"));
+    return clients
+      .map((client) => ({
+        ...client,
+        clientType: client.clientType ?? "externe",
+      }))
+      .sort((a, b) => a.name.localeCompare(b.name, "fr"));
   },
 });
 
@@ -214,6 +220,7 @@ export const createClient = mutation({
     return await ctx.db.insert("ptClients", {
       ...args,
       name: args.name.trim(),
+      clientType: args.clientType,
       createdAt: Date.now(),
     });
   },
@@ -223,7 +230,11 @@ export const updateClient = mutation({
   args: { clientId: v.id("ptClients"), ...clientFields },
   handler: async (ctx, { clientId, ...patch }) => {
     await requireCrmPermission(ctx, CLIENTS_PAGE_KEY, "update");
-    await ctx.db.patch(clientId, { ...patch, name: patch.name.trim() });
+    await ctx.db.patch(clientId, {
+      ...patch,
+      name: patch.name.trim(),
+      clientType: patch.clientType,
+    });
   },
 });
 
@@ -283,25 +294,55 @@ export const listProjects = query({
       ctx.db.query("ptClients").collect(),
       ctx.db.query("ptTimeEntries").collect(),
     ]);
-    const nameById = new Map(clients.map((c) => [c._id, c.name]));
-
-    // Reste à facturer par projet = pointages non encore marqués « facturé ».
-    const toBillByProject = new Map<string, number>();
+    const clientById = new Map(
+      clients.map((client) => [
+        client._id,
+        {
+          name: client.name,
+          clientType: client.clientType ?? "externe",
+        },
+      ]),
+    );
+    const totalsByProject = new Map<
+      string,
+      { entriesCount: number; totalPointed: number; billedPointed: number; toBillPointed: number }
+    >();
     for (const entry of entries) {
-      if (isEntryBilled(entry.billingStatus)) continue;
-      toBillByProject.set(
-        entry.projectId,
-        (toBillByProject.get(entry.projectId) ?? 0) + entry.totalCost,
-      );
+      const current = totalsByProject.get(entry.projectId) ?? {
+        entriesCount: 0,
+        totalPointed: 0,
+        billedPointed: 0,
+        toBillPointed: 0,
+      };
+      current.entriesCount += 1;
+      current.totalPointed += entry.totalCost;
+      if (isEntryBilled(entry.billingStatus)) {
+        current.billedPointed += entry.totalCost;
+      } else {
+        current.toBillPointed += entry.totalCost;
+      }
+      totalsByProject.set(entry.projectId, current);
     }
 
     return projects
-      .map((p) => ({
-        ...p,
-        clientName: nameById.get(p.clientId) ?? "—",
-        travelRatePerKm: p.travelRatePerKm ?? DEFAULT_TRAVEL_RATE_PER_KM,
-        toBillPointed: round2(toBillByProject.get(p._id) ?? 0),
-      }))
+      .map((p) => {
+        const totals = totalsByProject.get(p._id) ?? {
+          entriesCount: 0,
+          totalPointed: 0,
+          billedPointed: 0,
+          toBillPointed: 0,
+        };
+        return {
+          ...p,
+          clientName: clientById.get(p.clientId)?.name ?? "—",
+          clientType: clientById.get(p.clientId)?.clientType ?? "externe",
+          travelRatePerKm: p.travelRatePerKm ?? DEFAULT_TRAVEL_RATE_PER_KM,
+          entriesCount: totals.entriesCount,
+          totalPointed: round2(totals.totalPointed),
+          billedPointed: round2(totals.billedPointed),
+          toBillPointed: round2(totals.toBillPointed),
+        };
+      })
       .sort((a, b) => a.name.localeCompare(b.name, "fr"));
   },
 });
@@ -424,9 +465,15 @@ export const projectSummary = query({
       project: {
         ...project,
         clientName: client?.name ?? "—",
+        clientType: client?.clientType ?? "externe",
         travelRatePerKm: project.travelRatePerKm ?? DEFAULT_TRAVEL_RATE_PER_KM,
       },
-      client,
+      client: client
+        ? {
+            ...client,
+            clientType: client.clientType ?? "externe",
+          }
+        : null,
       entries: entries.map((entry) => ({
         ...entry,
         billingStatus: normalizeBillingStatus(entry.billingStatus),
@@ -980,7 +1027,10 @@ export const clientSummary = query({
     );
 
     return {
-      client,
+      client: {
+        ...client,
+        clientType: client.clientType ?? "externe",
+      },
       projects: projectSummaries.sort((a, b) => a.name.localeCompare(b.name, "fr")),
       invoices: clientInvoices.sort((a, b) => b.issuedAt - a.issuedAt),
       counts: {
@@ -1199,6 +1249,7 @@ export const adminImportLegacyPointeuse = mutation({
       }
       const clientId = await ctx.db.insert("ptClients", {
         name: legacy.name.trim(),
+        clientType: "externe",
         ...(legacy.email ? { email: legacy.email.trim() } : {}),
         ...(legacy.phone ? { phone: legacy.phone.trim() } : {}),
         ...(legacy.address ? { address: legacy.address.trim() } : {}),

@@ -18,7 +18,7 @@ import { api } from "../../convex/_generated/api";
 import type { Id } from "../../convex/_generated/dataModel";
 import { PageHeader, Badge } from "../components/ui/PageHeader";
 import { Button } from "../components/ui/Button";
-import { Field, Input, Textarea } from "../components/ui/Field";
+import { AppSelect, Field, Input, Textarea } from "../components/ui/Field";
 import { Modal } from "../components/ui/Modal";
 import { EmptyState } from "../components/ui/EmptyState";
 import { FullSpinner } from "../components/ui/Spinner";
@@ -26,13 +26,14 @@ import { AddressAutocomplete } from "../components/ui/AddressAutocomplete";
 import { SearchInput, matchesSearch } from "../components/ui/SearchInput";
 import { cn } from "../lib/cn";
 import { formatDate, formatEuros } from "../lib/format";
-import { invoiceStatusMeta, projectStatusMeta } from "../lib/labels";
+import { CLIENT_TYPES, clientTypeMeta, invoiceStatusMeta, projectStatusMeta } from "../lib/labels";
 
 type ClientTab = "infos" | "projets" | "factures";
 
 type Client = {
   _id: Id<"ptClients">;
   name: string;
+  clientType: "interne" | "externe";
   contactName?: string;
   email?: string;
   phone?: string;
@@ -48,20 +49,22 @@ export function Clients() {
   const [creating, setCreating] = useState(false);
   const [selectedClientId, setSelectedClientId] = useState<Id<"ptClients"> | null>(null);
   const [search, setSearch] = useState("");
+  const [typeFilter, setTypeFilter] = useState<"all" | "interne" | "externe">("all");
 
   const filteredClients = useMemo(
     () =>
-      (clients ?? []).filter((c) =>
-        matchesSearch(search, [
+      (clients ?? []).filter((c) => {
+        if (typeFilter !== "all" && c.clientType !== typeFilter) return false;
+        return matchesSearch(search, [
           c.name,
           c.contactName,
           c.email,
           c.phone,
           c.postalCode,
           c.city,
-        ]),
-      ),
-    [clients, search],
+        ]);
+      }),
+    [clients, search, typeFilter],
   );
 
   return (
@@ -91,12 +94,27 @@ export function Clients() {
         />
       ) : (
         <>
-          <div className="mb-4 max-w-md">
-            <SearchInput
-              value={search}
-              onChange={setSearch}
-              placeholder="Rechercher un client, contact, ville…"
-            />
+          <div className="mb-4 grid gap-3 lg:grid-cols-[minmax(0,1fr)_220px]">
+            <div className="max-w-md">
+              <SearchInput
+                value={search}
+                onChange={setSearch}
+                placeholder="Rechercher un client, contact, ville…"
+              />
+            </div>
+            <Field label="Type">
+              <AppSelect
+                value={typeFilter}
+                onChange={(value) => setTypeFilter(value as "all" | "interne" | "externe")}
+                options={[
+                  { value: "all", label: "Tous les clients" },
+                  ...CLIENT_TYPES.map((item) => ({
+                    value: item.value,
+                    label: item.label,
+                  })),
+                ]}
+              />
+            </Field>
           </div>
           {filteredClients.length === 0 ? (
             <EmptyState
@@ -116,7 +134,12 @@ export function Clients() {
                     <p className="min-w-0 flex-1 truncate font-semibold text-[var(--foreground)]">
                       {c.name}
                     </p>
-                    <ChevronRight className="h-4 w-4 shrink-0 text-[var(--muted-foreground)] transition group-hover:translate-x-0.5" />
+                    <div className="flex items-center gap-2">
+                      <Badge tone={clientTypeMeta(c.clientType).tone}>
+                        {clientTypeMeta(c.clientType).label}
+                      </Badge>
+                      <ChevronRight className="h-4 w-4 shrink-0 text-[var(--muted-foreground)] transition group-hover:translate-x-0.5" />
+                    </div>
                   </div>
                   {c.contactName ? (
                     <p className="mt-1 flex items-center gap-1.5 truncate text-sm text-[var(--muted-foreground)]">
@@ -211,6 +234,11 @@ function ClientDetailModal({
               {counts.projects} projet{counts.projects > 1 ? "s" : ""} ·{" "}
               {counts.entries} pointage{counts.entries > 1 ? "s" : ""}
             </p>
+            <div className="mt-2">
+              <Badge tone={clientTypeMeta(client.clientType).tone}>
+                {clientTypeMeta(client.clientType).label}
+              </Badge>
+            </div>
           </div>
           <Button variant="secondary" onClick={() => onEdit(client as Client)}>
             <Pencil className="h-4 w-4" /> Modifier
@@ -403,6 +431,7 @@ function ClientForm({
   const update = useMutation(api.pointeuse.updateClient);
   const remove = useMutation(api.pointeuse.deleteClient);
   const [name, setName] = useState(client?.name ?? "");
+  const [clientType, setClientType] = useState<Client["clientType"]>(client?.clientType ?? "externe");
   const [contactName, setContactName] = useState(client?.contactName ?? "");
   const [email, setEmail] = useState(client?.email ?? "");
   const [phone, setPhone] = useState(client?.phone ?? "");
@@ -419,6 +448,7 @@ function ClientForm({
     setError(null);
     const payload = {
       name,
+      clientType,
       contactName: contactName || undefined,
       email: email || undefined,
       phone: phone || undefined,
@@ -459,6 +489,16 @@ function ClientForm({
       <div className="space-y-4">
         <Field label="Nom / raison sociale" required>
           <Input value={name} onChange={(e) => setName(e.target.value)} />
+        </Field>
+        <Field label="Type de client" required>
+          <AppSelect
+            value={clientType}
+            onChange={(value) => setClientType(value as Client["clientType"])}
+            options={CLIENT_TYPES.map((item) => ({
+              value: item.value,
+              label: item.label,
+            }))}
+          />
         </Field>
         <div className="grid gap-3 sm:grid-cols-2">
           <Field label="Contact">

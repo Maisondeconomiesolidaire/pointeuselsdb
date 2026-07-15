@@ -2,12 +2,9 @@ import { useMemo, useState } from "react";
 import { useMutation, useQuery } from "convex/react";
 import {
   ArrowLeft,
-  BadgeCheck,
   Check,
   ClipboardList,
-  FileText,
   Plus,
-  RotateCcw,
   Trash2,
 } from "lucide-react";
 import { api } from "../../convex/_generated/api";
@@ -20,6 +17,7 @@ import { EmptyState } from "../components/ui/EmptyState";
 import { FullSpinner } from "../components/ui/Spinner";
 import { SearchInput, matchesSearch } from "../components/ui/SearchInput";
 import { PhotoPicker, type PickedPhoto } from "../components/ui/PhotoPicker";
+import { PointageDetailModal } from "../components/pointeuse/PointageDetailModal";
 import { formatDate, formatEuros, parseDateInput, toDateInputValue } from "../lib/format";
 import { cn } from "../lib/cn";
 
@@ -44,26 +42,6 @@ export function Pointages() {
       ),
     [entries, search],
   );
-
-  const summary = useMemo(() => {
-    let total = 0;
-    let billed = 0;
-    let billedCount = 0;
-    for (const e of filteredEntries) {
-      total += e.totalCost;
-      if (e.billingStatus === "facture") {
-        billed += e.totalCost;
-        billedCount += 1;
-      }
-    }
-    return {
-      total: round2(total),
-      billed: round2(billed),
-      toBill: round2(total - billed),
-      billedCount,
-      toBillCount: filteredEntries.length - billedCount,
-    };
-  }, [filteredEntries]);
 
   function toggleBilling(entryId: Id<"ptTimeEntries">, current: string) {
     void updateBillingStatus({
@@ -104,21 +82,6 @@ export function Pointages() {
               value={search}
               onChange={setSearch}
               placeholder="Rechercher un projet, client, salarié…"
-            />
-          </div>
-          <div className="mb-4 grid gap-3 sm:grid-cols-3">
-            <SummaryTile label="Total pointé" value={formatEuros(summary.total)} />
-            <SummaryTile
-              label="À facturer"
-              value={formatEuros(summary.toBill)}
-              hint={`${summary.toBillCount} pointage${summary.toBillCount > 1 ? "s" : ""}`}
-              tone="amber"
-            />
-            <SummaryTile
-              label="Facturé"
-              value={formatEuros(summary.billed)}
-              hint={`${summary.billedCount} pointage${summary.billedCount > 1 ? "s" : ""}`}
-              tone="green"
             />
           </div>
           {filteredEntries.length === 0 ? (
@@ -229,217 +192,6 @@ export function Pointages() {
         />
       ) : null}
     </div>
-  );
-}
-
-function SummaryTile({
-  label,
-  value,
-  hint,
-  tone = "neutral",
-}: {
-  label: string;
-  value: string;
-  hint?: string;
-  tone?: "neutral" | "amber" | "green";
-}) {
-  const accent =
-    tone === "amber"
-      ? "text-amber-600"
-      : tone === "green"
-        ? "text-emerald-600"
-        : "text-[var(--foreground)]";
-  return (
-    <div className="rounded-xl border border-[var(--border)] bg-[var(--card)] p-4">
-      <p className="text-xs uppercase tracking-wide text-[var(--muted-foreground)]">
-        {label}
-      </p>
-      <p className={cn("mt-1 text-xl font-semibold", accent)}>{value}</p>
-      {hint ? (
-        <p className="mt-0.5 text-xs text-[var(--muted-foreground)]">{hint}</p>
-      ) : null}
-    </div>
-  );
-}
-
-function PointageDetailModal({
-  entryId,
-  onClose,
-}: {
-  entryId: Id<"ptTimeEntries">;
-  onClose: () => void;
-}) {
-  const entry = useQuery(api.pointeuse.getTimeEntry, { entryId });
-  const updateBillingStatus = useMutation(api.pointeuse.updateTimeEntryBillingStatus);
-  const [savingStatus, setSavingStatus] = useState(false);
-
-  async function toggleBilling(current: string) {
-    setSavingStatus(true);
-    try {
-      await updateBillingStatus({
-        entryId,
-        billingStatus: current === "facture" ? "a_facturer" : "facture",
-      });
-    } finally {
-      setSavingStatus(false);
-    }
-  }
-
-  if (entry === undefined) {
-    return (
-      <Modal open onClose={onClose} title="Pointage">
-        <FullSpinner />
-      </Modal>
-    );
-  }
-
-  if (entry === null) {
-    return (
-      <Modal open onClose={onClose} title="Pointage introuvable">
-        <EmptyState
-          icon={<ClipboardList className="h-8 w-8" />}
-          title="Pointage introuvable"
-          description="Ce pointage n'existe plus."
-        />
-      </Modal>
-    );
-  }
-
-  return (
-    <Modal open onClose={onClose} title="Détail du pointage" className="sm:h-auto sm:max-w-2xl">
-      <div className="space-y-5">
-        <div className="flex flex-col gap-3 rounded-xl border border-[var(--border)] bg-[var(--accent)] p-4 sm:flex-row sm:items-start sm:justify-between">
-          <div>
-            <p className="text-lg font-semibold text-[var(--foreground)]">{entry.projectName}</p>
-            <p className="text-sm text-[var(--muted-foreground)]">
-              {entry.clientName} · {formatDate(entry.date)}
-            </p>
-            {entry.createdBy ? (
-              <p className="mt-1 text-xs text-[var(--muted-foreground)]">
-                Saisi par {entry.createdBy}
-              </p>
-            ) : null}
-          </div>
-          <div className="flex flex-col items-start gap-2 sm:items-end">
-            <span
-              className={cn(
-                "rounded-full px-2.5 py-1 text-xs font-semibold",
-                entry.billingStatus === "facture"
-                  ? "bg-emerald-100 text-emerald-700"
-                  : "bg-amber-100 text-amber-700",
-              )}
-            >
-              {entry.billingStatus === "facture" ? "Facturé" : "À facturer"}
-            </span>
-            <p className="text-lg font-semibold text-[var(--foreground)]">
-              {formatEuros(entry.totalCost)}
-            </p>
-          </div>
-        </div>
-
-        <div className="rounded-xl border border-[var(--border)] p-4">
-          <h3 className="mb-3 text-sm font-semibold text-[var(--foreground)]">Temps saisi</h3>
-          <div className="space-y-2">
-            {entry.lines.map((line, index) => (
-              <div
-                key={`${line.employeeId}-${index}`}
-                className="flex flex-col gap-1 rounded-lg bg-[var(--accent)] px-3 py-2 sm:flex-row sm:items-center sm:justify-between"
-              >
-                <span className="text-sm font-medium text-[var(--foreground)]">
-                  {line.employeeName}
-                </span>
-                <span className="text-sm text-[var(--muted-foreground)]">
-                  {line.hours} h · {formatEuros(line.hourlyRate)}/h · {formatEuros(line.cost)}
-                </span>
-              </div>
-            ))}
-          </div>
-        </div>
-
-        <div className="grid gap-3 sm:grid-cols-2">
-          <div className="rounded-xl border border-[var(--border)] p-4">
-            <h3 className="mb-3 text-sm font-semibold text-[var(--foreground)]">Déplacements</h3>
-            {entry.travel ? (
-              <div className="space-y-1 text-sm text-[var(--muted-foreground)]">
-                <p>{entry.travel.roundTrips} aller-retour</p>
-                <p>{entry.travel.distanceKm} km aller</p>
-                <p>{(entry.travel.ratePerKm ?? 1).toFixed(2)} €/km</p>
-                <p className="font-medium text-[var(--foreground)]">
-                  {formatEuros(entry.travelCost)}
-                </p>
-              </div>
-            ) : (
-              <p className="text-sm text-[var(--muted-foreground)]">Aucun déplacement.</p>
-            )}
-          </div>
-          <div className="rounded-xl border border-[var(--border)] p-4">
-            <h3 className="mb-3 text-sm font-semibold text-[var(--foreground)]">Résumé</h3>
-            <div className="space-y-1 text-sm text-[var(--muted-foreground)]">
-              <Row label="Main-d'œuvre" value={formatEuros(entry.laborCost)} />
-              <Row label="Déplacements" value={formatEuros(entry.travelCost)} />
-              <div className="border-t border-[var(--border)] pt-2">
-                <Row label="Total" value={formatEuros(entry.totalCost)} />
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <div className="rounded-xl border border-[var(--border)] p-4">
-          <h3 className="mb-3 text-sm font-semibold text-[var(--foreground)]">Remarques</h3>
-          <p className="text-sm text-[var(--muted-foreground)]">
-            {entry.notes || "Aucune remarque."}
-          </p>
-        </div>
-
-        <div className="rounded-xl border border-[var(--border)] p-4">
-          <h3 className="mb-3 flex items-center gap-2 text-sm font-semibold text-[var(--foreground)]">
-            <FileText className="h-4 w-4 text-brand-500" />
-            Documents ({entry.documents.length})
-          </h3>
-          {entry.documents.length === 0 ? (
-            <p className="text-sm text-[var(--muted-foreground)]">Aucun document rattaché.</p>
-          ) : (
-            <div className="flex flex-wrap gap-2">
-              {entry.documents.map((document) =>
-                document.url ? (
-                  <a
-                    key={document._id}
-                    href={document.url}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="inline-flex items-center gap-2 rounded-lg border border-[var(--border)] bg-[var(--card)] px-3 py-2 text-sm text-[var(--foreground)] hover:border-brand-300"
-                  >
-                    <FileText className="h-4 w-4 text-[var(--muted-foreground)]" />
-                    {document.name}
-                  </a>
-                ) : null,
-              )}
-            </div>
-          )}
-        </div>
-
-        <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-between">
-          <Button variant="secondary" onClick={onClose}>
-            Fermer
-          </Button>
-          {entry.billingStatus === "facture" ? (
-            <Button
-              variant="secondary"
-              onClick={() => toggleBilling(entry.billingStatus)}
-              disabled={savingStatus}
-            >
-              <RotateCcw className="h-4 w-4" />
-              {savingStatus ? "Mise à jour…" : "Repasser à facturer"}
-            </Button>
-          ) : (
-            <Button onClick={() => toggleBilling(entry.billingStatus)} disabled={savingStatus}>
-              <BadgeCheck className="h-4 w-4" />
-              {savingStatus ? "Mise à jour…" : "Marquer facturé"}
-            </Button>
-          )}
-        </div>
-      </div>
-    </Modal>
   );
 }
 

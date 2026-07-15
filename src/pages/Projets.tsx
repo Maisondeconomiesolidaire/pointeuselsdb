@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { useAction, useMutation, useQuery } from "convex/react";
 import {
+  ChevronRight,
   FileText,
   FolderKanban,
   Loader2,
@@ -21,15 +22,17 @@ import { FullSpinner } from "../components/ui/Spinner";
 import { AddressAutocomplete } from "../components/ui/AddressAutocomplete";
 import { SearchInput, matchesSearch } from "../components/ui/SearchInput";
 import { DocumentPicker, type PickedDoc } from "../components/ui/DocumentPicker";
+import { PointageDetailModal } from "../components/pointeuse/PointageDetailModal";
 import { cn } from "../lib/cn";
 import { formatDate, formatEuros } from "../lib/format";
-import { PROJECT_STATUSES, projectStatusMeta } from "../lib/labels";
+import { CLIENT_TYPES, clientTypeMeta, PROJECT_STATUSES, projectStatusMeta } from "../lib/labels";
 
 type Project = {
   _id: Id<"ptProjects">;
   name: string;
   clientId: Id<"ptClients">;
   clientName?: string;
+  clientType?: "interne" | "externe";
   address?: string;
   postalCode?: string;
   city?: string;
@@ -47,6 +50,7 @@ type ProjectSummary = {
   project: Project & { clientName?: string };
   client: {
     name: string;
+    clientType: "interne" | "externe";
     contactName?: string;
     email?: string;
     phone?: string;
@@ -118,10 +122,13 @@ export function Projets() {
 
 function ProjectList({ initialProjectId }: { initialProjectId?: Id<"ptProjects"> }) {
   const projects = useQuery(api.pointeuse.listProjects);
+  const clients = useQuery(api.pointeuse.listClients);
   const navigate = useNavigate();
   const [creating, setCreating] = useState(false);
   const [search, setSearch] = useState("");
   const [sortBy, setSortBy] = useState("amount_desc");
+  const [activeClientId, setActiveClientId] = useState<Id<"ptClients"> | null>(null);
+  const [typeFilter, setTypeFilter] = useState<"all" | "interne" | "externe">("all");
   const [selectedProjectId, setSelectedProjectId] = useState<Id<"ptProjects"> | null>(
     initialProjectId ?? null,
   );
@@ -144,13 +151,9 @@ function ProjectList({ initialProjectId }: { initialProjectId?: Id<"ptProjects">
 
   const filteredProjects = useMemo(() => {
     const filtered = (projects ?? []).filter((p) =>
-      matchesSearch(search, [
-        p.name,
-        p.clientName,
-        p.address,
-        p.postalCode,
-        p.city,
-      ]),
+      (typeFilter === "all" || p.clientType === typeFilter) &&
+      (!activeClientId || p.clientId === activeClientId) &&
+      matchesSearch(search, [p.name, p.clientName, p.address, p.postalCode, p.city]),
     );
 
     return [...filtered].sort((a, b) => {
@@ -170,7 +173,60 @@ function ProjectList({ initialProjectId }: { initialProjectId?: Id<"ptProjects">
           return (b.toBillPointed ?? 0) - (a.toBillPointed ?? 0);
       }
     });
-  }, [projects, search, sortBy]);
+  }, [activeClientId, projects, search, sortBy, typeFilter]);
+
+  const matchingClients = useMemo(() => {
+    if (!search.trim() || activeClientId) return [];
+    return (clients ?? [])
+      .filter((client) => {
+        if (typeFilter !== "all" && client.clientType !== typeFilter) return false;
+        return matchesSearch(search, [client.name, client.city, client.contactName]);
+      })
+      .slice(0, 6);
+  }, [activeClientId, clients, search, typeFilter]);
+
+  const selectedClient = useMemo(
+    () => (clients ?? []).find((client) => client._id === activeClientId) ?? null,
+    [activeClientId, clients],
+  );
+
+  const summary = useMemo(() => {
+    let totalPointed = 0;
+    let billedPointed = 0;
+    let toBillPointed = 0;
+    let projectsInProgress = 0;
+    for (const project of filteredProjects) {
+      totalPointed += project.totalPointed ?? 0;
+      billedPointed += project.billedPointed ?? 0;
+      toBillPointed += project.toBillPointed ?? 0;
+      if (project.status !== "termine") projectsInProgress += 1;
+    }
+    return {
+      totalPointed,
+      billedPointed,
+      toBillPointed,
+      projectsInProgress,
+      projectsCompleted: filteredProjects.length - projectsInProgress,
+    };
+  }, [filteredProjects]);
+
+  const columns = useMemo(
+    () => [
+      {
+        key: "en_cours",
+        title: "En cours",
+        description: "Inclut les projets en cours et en pause.",
+        projects: filteredProjects.filter((project) => project.status !== "termine"),
+      },
+      {
+        key: "termine",
+        title: "Terminée",
+        description: "Projets clôturés.",
+        projects: filteredProjects.filter((project) => project.status === "termine"),
+      },
+    ],
+    [filteredProjects],
+  );
 
   return (
     <div>
@@ -199,17 +255,84 @@ function ProjectList({ initialProjectId }: { initialProjectId?: Id<"ptProjects">
         />
       ) : (
         <>
-          <div className="mb-4 grid gap-3 lg:grid-cols-[minmax(0,1fr)_280px]">
-            <div className="max-w-md">
-              <SearchInput
-                value={search}
-                onChange={setSearch}
-                placeholder="Rechercher un projet, client, ville…"
-              />
+          <div className="mb-4 grid gap-3 xl:grid-cols-[minmax(0,1fr)_220px_220px]">
+            <div className="space-y-2">
+              <div className="max-w-md">
+                <SearchInput
+                  value={search}
+                  onChange={setSearch}
+                  placeholder="Rechercher un projet, client, ville…"
+                />
+              </div>
+              {selectedClient ? (
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setActiveClientId(null)}
+                    className="inline-flex items-center gap-2 rounded-full border border-[var(--border)] bg-[var(--card)] px-3 py-1.5 text-sm text-[var(--foreground)]"
+                  >
+                    {selectedClient.name}
+                    <span className="text-[var(--muted-foreground)]">×</span>
+                  </button>
+                  <Badge tone={clientTypeMeta(selectedClient.clientType).tone}>
+                    {clientTypeMeta(selectedClient.clientType).label}
+                  </Badge>
+                </div>
+              ) : null}
+              {matchingClients.length > 0 ? (
+                <div className="max-w-xl rounded-2xl border border-[var(--border)] bg-[var(--card)] p-2 shadow-sm">
+                  <p className="px-2 pb-1 text-xs font-medium uppercase tracking-wide text-[var(--muted-foreground)]">
+                    Clients correspondants
+                  </p>
+                  <div className="space-y-1">
+                    {matchingClients.map((client) => (
+                      <button
+                        key={client._id}
+                        type="button"
+                        onClick={() => setActiveClientId(client._id)}
+                        className="flex w-full items-center justify-between gap-3 rounded-xl px-3 py-2 text-left transition hover:bg-[var(--accent)]"
+                      >
+                        <span className="min-w-0">
+                          <span className="block truncate text-sm font-medium text-[var(--foreground)]">
+                            {client.name}
+                          </span>
+                          <span className="block truncate text-xs text-[var(--muted-foreground)]">
+                            {[client.postalCode, client.city].filter(Boolean).join(" ")}
+                          </span>
+                        </span>
+                        <ChevronRight className="h-4 w-4 shrink-0 text-[var(--muted-foreground)]" />
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              ) : null}
             </div>
+            <Field label="Type de client">
+              <AppSelect
+                value={typeFilter}
+                onChange={(value) => setTypeFilter(value as "all" | "interne" | "externe")}
+                options={[
+                  { value: "all", label: "Tous les clients" },
+                  ...CLIENT_TYPES.map((item) => ({
+                    value: item.value,
+                    label: item.label,
+                  })),
+                ]}
+              />
+            </Field>
             <Field label="Tri">
               <AppSelect value={sortBy} onChange={setSortBy} options={sortOptions} />
             </Field>
+          </div>
+          <div className="mb-5 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+            <StatCard label="Total pointé" value={formatEuros(summary.totalPointed)} />
+            <StatCard label="À facturer" value={formatEuros(summary.toBillPointed)} tone="amber" />
+            <StatCard label="Facturé" value={formatEuros(summary.billedPointed)} tone="green" />
+            <StatCard
+              label="Projets visibles"
+              value={String(filteredProjects.length)}
+              hint={`${summary.projectsInProgress} en cours · ${summary.projectsCompleted} terminés`}
+            />
           </div>
           {filteredProjects.length === 0 ? (
             <EmptyState
@@ -218,45 +341,100 @@ function ProjectList({ initialProjectId }: { initialProjectId?: Id<"ptProjects">
               description={`Aucun projet ne correspond à « ${search} ».`}
             />
           ) : (
-            <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
-              {filteredProjects.map((p) => {
-            const meta = projectStatusMeta(p.status);
-            return (
-              <button
-                key={p._id}
-                onClick={() => setSelectedProjectId(p._id)}
-                className="rounded-xl border border-[var(--border)] bg-[var(--card)] p-4 text-left transition hover:border-brand-300 hover:shadow-sm"
-              >
-                <div className="flex items-start justify-between gap-2">
-                  <p className="min-w-0 flex-1 truncate font-semibold text-[var(--foreground)]">{p.name}</p>
-                  <Badge tone={meta.tone}>{meta.label}</Badge>
-                </div>
-                <p className="mt-1 truncate text-sm text-[var(--muted-foreground)]">{p.clientName}</p>
-                {p.city ? (
-                  <p className="mt-2 flex items-center gap-1.5 text-sm text-[var(--muted-foreground)]">
-                    <MapPin className="h-3.5 w-3.5" />
-                    {p.postalCode} {p.city}
-                  </p>
-                ) : null}
-                <p className="mt-1 text-xs text-[var(--muted-foreground)]">
-                  {p.distanceKm} km depuis la base · {(p.travelRatePerKm ?? 1).toFixed(2)} €/km
-                </p>
-                <div className="mt-3 rounded-xl bg-[var(--accent)] px-3 py-2.5">
-                  <span className="text-[11px] font-medium uppercase tracking-wide text-[var(--muted-foreground)]">
-                    Reste à facturer
-                  </span>
-                  <span
-                    className={cn(
-                      "mt-1 block text-lg font-semibold",
-                      (p.toBillPointed ?? 0) > 0 ? "text-amber-600" : "text-emerald-600",
-                    )}
-                  >
-                    {formatEuros(p.toBillPointed ?? 0)}
-                  </span>
-                </div>
-              </button>
-                );
-              })}
+            <div className="grid gap-4 xl:grid-cols-2">
+              {columns.map((column) => (
+                <section
+                  key={column.key}
+                  className="rounded-[28px] border border-[var(--border)] bg-[var(--card)]/80 p-4 shadow-sm backdrop-blur"
+                >
+                  <div className="mb-4 flex items-start justify-between gap-3">
+                    <div>
+                      <h2 className="text-lg font-semibold text-[var(--foreground)]">
+                        {column.title}
+                      </h2>
+                      <p className="text-sm text-[var(--muted-foreground)]">
+                        {column.description}
+                      </p>
+                    </div>
+                    <span className="rounded-full bg-[var(--accent)] px-3 py-1 text-sm font-medium text-[var(--foreground)]">
+                      {column.projects.length}
+                    </span>
+                  </div>
+                  {column.projects.length === 0 ? (
+                    <div className="rounded-2xl border border-dashed border-[var(--border)] px-4 py-8 text-center text-sm text-[var(--muted-foreground)]">
+                      Aucun projet dans cette colonne.
+                    </div>
+                  ) : (
+                    <div className="space-y-3">
+                      {column.projects.map((project) => (
+                        <button
+                          key={project._id}
+                          onClick={() => setSelectedProjectId(project._id)}
+                          className="w-full rounded-2xl border border-[var(--border)] bg-[var(--card)] p-4 text-left transition hover:-translate-y-0.5 hover:border-brand-300 hover:shadow-md"
+                        >
+                          <div className="flex items-start justify-between gap-3">
+                            <div className="min-w-0 flex-1">
+                              <div className="flex items-center gap-2">
+                                <p className="truncate text-base font-semibold text-[var(--foreground)]">
+                                  {project.name}
+                                </p>
+                                <Badge tone={projectStatusMeta(project.status).tone}>
+                                  {projectStatusMeta(project.status).label}
+                                </Badge>
+                              </div>
+                              <div className="mt-1 flex flex-wrap items-center gap-2">
+                                <p className="truncate text-sm text-[var(--muted-foreground)]">
+                                  {project.clientName}
+                                </p>
+                                <Badge tone={clientTypeMeta(project.clientType).tone}>
+                                  {clientTypeMeta(project.clientType).label}
+                                </Badge>
+                              </div>
+                            </div>
+                            <ChevronRight className="mt-1 h-4 w-4 shrink-0 text-[var(--muted-foreground)]" />
+                          </div>
+                          {project.city ? (
+                            <p className="mt-3 flex items-center gap-1.5 text-sm text-[var(--muted-foreground)]">
+                              <MapPin className="h-3.5 w-3.5" />
+                              {project.postalCode} {project.city}
+                            </p>
+                          ) : null}
+                          <div className="mt-3 grid gap-2 sm:grid-cols-2">
+                            <div className="rounded-xl bg-[var(--accent)] px-3 py-2">
+                              <p className="text-[11px] font-medium uppercase tracking-wide text-[var(--muted-foreground)]">
+                                À facturer
+                              </p>
+                              <p
+                                className={cn(
+                                  "mt-1 text-lg font-semibold",
+                                  (project.toBillPointed ?? 0) > 0
+                                    ? "text-amber-600"
+                                    : "text-emerald-600",
+                                )}
+                              >
+                                {formatEuros(project.toBillPointed ?? 0)}
+                              </p>
+                            </div>
+                            <div className="rounded-xl bg-[var(--accent)] px-3 py-2">
+                              <p className="text-[11px] font-medium uppercase tracking-wide text-[var(--muted-foreground)]">
+                                Total pointé
+                              </p>
+                              <p className="mt-1 text-lg font-semibold text-[var(--foreground)]">
+                                {formatEuros(project.totalPointed ?? 0)}
+                              </p>
+                            </div>
+                          </div>
+                          <p className="mt-3 text-xs text-[var(--muted-foreground)]">
+                            {project.entriesCount} pointage{project.entriesCount > 1 ? "s" : ""} ·{" "}
+                            {project.distanceKm} km depuis la base ·{" "}
+                            {(project.travelRatePerKm ?? 1).toFixed(2)} €/km
+                          </p>
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </section>
+              ))}
             </div>
           )}
         </>
@@ -291,6 +469,7 @@ function ProjectDetailModal({
   const [deliveryDocs, setDeliveryDocs] = useState<PickedDoc[]>([]);
   const [invoiceDocs, setInvoiceDocs] = useState<PickedDoc[]>([]);
   const [deliverySupplierId, setDeliverySupplierId] = useState<string>("");
+  const [selectedEntryId, setSelectedEntryId] = useState<Id<"ptTimeEntries"> | null>(null);
 
   if (summary === undefined) {
     return (
@@ -344,6 +523,11 @@ function ProjectDetailModal({
               {project.clientName}
               {project.city ? ` · ${project.postalCode} ${project.city}` : ""} · {project.distanceKm} km · {(project.travelRatePerKm ?? 1).toFixed(2)} €/km
             </p>
+            <div className="mt-2">
+              <Badge tone={clientTypeMeta(project.clientType).tone}>
+                {clientTypeMeta(project.clientType).label}
+              </Badge>
+            </div>
           </div>
           <Button variant="secondary" onClick={() => setEditing(true)}>
             <Pencil className="h-4 w-4" /> Modifier
@@ -420,6 +604,7 @@ function ProjectDetailModal({
               <InfoGrid
                 items={[
                   ["Nom", client?.name ?? project.clientName ?? "—"],
+                  ["Type", clientTypeMeta(client?.clientType).label],
                   ["Contact", client?.contactName ?? "—"],
                   ["Email", client?.email ?? "—"],
                   ["Téléphone", client?.phone ?? "—"],
@@ -440,7 +625,12 @@ function ProjectDetailModal({
               ) : (
                 <div className="divide-y divide-[var(--border)]">
                   {entries.map((e) => (
-                    <div key={e._id} className="py-3">
+                    <button
+                      key={e._id}
+                      type="button"
+                      onClick={() => setSelectedEntryId(e._id)}
+                      className="block w-full py-3 text-left transition hover:bg-[var(--accent)]/40"
+                    >
                       <div className="flex items-center justify-between gap-3">
                         <div>
                           <p className="text-sm font-medium text-[var(--foreground)]">{formatDate(e.date)}</p>
@@ -465,7 +655,7 @@ function ProjectDetailModal({
                           </span>
                         ))}
                       </div>
-                    </div>
+                    </button>
                   ))}
                 </div>
               )}
@@ -585,6 +775,9 @@ function ProjectDetailModal({
       </div>
 
       {editing ? <ProjectForm project={project as Project} onClose={() => setEditing(false)} /> : null}
+      {selectedEntryId ? (
+        <PointageDetailModal entryId={selectedEntryId} onClose={() => setSelectedEntryId(null)} />
+      ) : null}
     </Modal>
   );
 }
@@ -635,11 +828,27 @@ function CommercialDocuments({
   );
 }
 
-function StatCard({ label, value, hint }: { label: string; value: string; hint?: string }) {
+function StatCard({
+  label,
+  value,
+  hint,
+  tone = "neutral",
+}: {
+  label: string;
+  value: string;
+  hint?: string;
+  tone?: "neutral" | "amber" | "green";
+}) {
+  const accent =
+    tone === "amber"
+      ? "text-amber-600"
+      : tone === "green"
+        ? "text-emerald-600"
+        : "text-[var(--foreground)]";
   return (
     <div className="rounded-xl border border-[var(--border)] bg-[var(--card)] p-4">
       <p className="text-xs uppercase tracking-wide text-[var(--muted-foreground)]">{label}</p>
-      <p className="mt-1 text-xl font-semibold text-[var(--foreground)]">{value}</p>
+      <p className={cn("mt-1 text-xl font-semibold", accent)}>{value}</p>
       {hint ? <p className="mt-0.5 text-xs text-[var(--muted-foreground)]">{hint}</p> : null}
     </div>
   );

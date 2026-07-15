@@ -1493,6 +1493,7 @@ export default defineSchema(
   /** Clients (donneurs d'ordre des chantiers). */
   ptClients: defineTable({
     name: v.string(),
+    clientType: v.optional(v.union(v.literal("interne"), v.literal("externe"))),
     contactName: v.optional(v.string()),
     email: v.optional(v.string()),
     phone: v.optional(v.string()),

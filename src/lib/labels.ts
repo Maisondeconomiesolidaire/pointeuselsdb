@@ -40,3 +40,18 @@ export function invoiceStatusMeta(value: string) {
     }
   );
 }
+
+export const CLIENT_TYPES = [
+  { value: "interne", label: "Interne", tone: "blue" as const },
+  { value: "externe", label: "Externe", tone: "neutral" as const },
+];
+
+export function clientTypeMeta(value?: string) {
+  return (
+    CLIENT_TYPES.find((item) => item.value === value) ?? {
+      value: "externe",
+      label: "Externe",
+      tone: "neutral" as const,
+    }
+  );
+}
