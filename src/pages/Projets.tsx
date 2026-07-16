@@ -109,6 +109,8 @@ type ProjectSummary = {
     billedPointed: number;
     toBillPointed: number;
     totalExpenses: number;
+    /** Pointages + déplacements + dépenses. */
+    totalCost: number;
     invoiced: number;
     paid: number;
     pending: number;
@@ -200,17 +202,23 @@ function ProjectList({ initialProjectId }: { initialProjectId?: Id<"ptProjects">
     let totalPointed = 0;
     let billedPointed = 0;
     let toBillPointed = 0;
+    let totalExpenses = 0;
+    let totalCost = 0;
     let projectsInProgress = 0;
     for (const project of filteredProjects) {
       totalPointed += project.totalPointed ?? 0;
       billedPointed += project.billedPointed ?? 0;
       toBillPointed += project.toBillPointed ?? 0;
+      totalExpenses += project.totalExpenses ?? 0;
+      totalCost += project.totalCost ?? 0;
       if (project.status !== "termine") projectsInProgress += 1;
     }
     return {
       totalPointed,
       billedPointed,
       toBillPointed,
+      totalExpenses,
+      totalCost,
       projectsInProgress,
       projectsCompleted: filteredProjects.length - projectsInProgress,
     };
@@ -324,7 +332,11 @@ function ProjectList({ initialProjectId }: { initialProjectId?: Id<"ptProjects">
             </Field>
           </div>
           <div className="mb-5 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-            <StatCard label="Total pointé" value={formatEuros(summary.totalPointed)} />
+            <StatCard
+              label="Total projets"
+              value={formatEuros(summary.totalCost)}
+              hint={`${formatEuros(summary.totalPointed)} pointés · ${formatEuros(summary.totalExpenses)} dépenses`}
+            />
             <StatCard label="À facturer" value={formatEuros(summary.toBillPointed)} tone="amber" />
             <StatCard label="Facturé" value={formatEuros(summary.billedPointed)} tone="green" />
             <StatCard
@@ -416,15 +428,31 @@ function ProjectList({ initialProjectId }: { initialProjectId?: Id<"ptProjects">
                             </div>
                             <div className="rounded-xl bg-[var(--accent)] px-3 py-2">
                               <p className="text-[11px] font-medium uppercase tracking-wide text-[var(--muted-foreground)]">
-                                Total pointé
+                                Dépenses
                               </p>
                               <p className="mt-1 text-lg font-semibold text-[var(--foreground)]">
-                                {formatEuros(project.totalPointed ?? 0)}
+                                {formatEuros(project.totalExpenses ?? 0)}
                               </p>
                             </div>
                           </div>
+                          <div className="mt-2 rounded-xl border border-brand-200 bg-brand-50 px-3 py-2 dark:border-brand-500/30 dark:bg-brand-500/10">
+                            <div className="flex items-baseline justify-between gap-2">
+                              <p className="text-[11px] font-medium uppercase tracking-wide text-[var(--muted-foreground)]">
+                                Total projet
+                              </p>
+                              <p className="text-lg font-semibold text-[var(--foreground)]">
+                                {formatEuros(project.totalCost ?? 0)}
+                              </p>
+                            </div>
+                            <p className="mt-0.5 text-[11px] text-[var(--muted-foreground)]">
+                              {formatEuros(project.laborCost ?? 0)} pointages +{" "}
+                              {formatEuros(project.travelCost ?? 0)} déplacements +{" "}
+                              {formatEuros(project.totalExpenses ?? 0)} dépenses
+                            </p>
+                          </div>
                           <p className="mt-3 text-xs text-[var(--muted-foreground)]">
                             {project.entriesCount} pointage{project.entriesCount > 1 ? "s" : ""} ·{" "}
+                            {project.expensesCount} dépense{project.expensesCount > 1 ? "s" : ""} ·{" "}
                             {project.distanceKm} km depuis la base ·{" "}
                             {(project.travelRatePerKm ?? 1).toFixed(2)} €/km
                           </p>
@@ -562,6 +590,13 @@ function ProjectDetailModal({
                 <StatCard label="Coût main-d'œuvre" value={formatEuros(totals.laborCost)} />
                 <StatCard label="Déplacements" value={formatEuros(totals.travelCost)} />
                 <StatCard label="Dépenses" value={formatEuros(totals.totalExpenses)} />
+                <StatCard
+                  label="Total projet"
+                  value={formatEuros(totals.totalCost)}
+                  hint="Pointages + déplacements + dépenses"
+                />
+              </div>
+              <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
                 <StatCard
                   label="Facturé / en attente"
                   value={formatEuros(totals.invoiced)}
