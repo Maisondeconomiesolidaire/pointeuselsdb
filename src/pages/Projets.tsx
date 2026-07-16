@@ -202,6 +202,8 @@ function ProjectList({ initialProjectId }: { initialProjectId?: Id<"ptProjects">
     let totalPointed = 0;
     let billedPointed = 0;
     let toBillPointed = 0;
+    let laborCost = 0;
+    let travelCost = 0;
     let totalExpenses = 0;
     let totalCost = 0;
     let projectsInProgress = 0;
@@ -209,6 +211,8 @@ function ProjectList({ initialProjectId }: { initialProjectId?: Id<"ptProjects">
       totalPointed += project.totalPointed ?? 0;
       billedPointed += project.billedPointed ?? 0;
       toBillPointed += project.toBillPointed ?? 0;
+      laborCost += project.laborCost ?? 0;
+      travelCost += project.travelCost ?? 0;
       totalExpenses += project.totalExpenses ?? 0;
       totalCost += project.totalCost ?? 0;
       if (project.status !== "termine") projectsInProgress += 1;
@@ -217,6 +221,8 @@ function ProjectList({ initialProjectId }: { initialProjectId?: Id<"ptProjects">
       totalPointed,
       billedPointed,
       toBillPointed,
+      laborCost,
+      travelCost,
       totalExpenses,
       totalCost,
       projectsInProgress,
@@ -331,12 +337,15 @@ function ProjectList({ initialProjectId }: { initialProjectId?: Id<"ptProjects">
               <AppSelect value={sortBy} onChange={setSortBy} options={sortOptions} />
             </Field>
           </div>
+          {/* Mêmes montants que les tuiles d'une card projet, cumulés sur les
+              projets affichés : total en tête, puis ses trois composantes. */}
+          <div className="mb-3 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+            <StatCard label="Total à facturer" value={formatEuros(summary.totalCost)} />
+            <StatCard label="Pointages" value={formatEuros(summary.laborCost)} />
+            <StatCard label="Dépenses" value={formatEuros(summary.totalExpenses)} />
+            <StatCard label="Déplacements" value={formatEuros(summary.travelCost)} />
+          </div>
           <div className="mb-5 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-            <StatCard
-              label="Total à facturer"
-              value={formatEuros(summary.totalCost)}
-              hint={`${formatEuros(summary.totalPointed)} pointés · ${formatEuros(summary.totalExpenses)} dépenses`}
-            />
             <StatCard
               label="Reste à facturer"
               value={formatEuros(summary.toBillPointed)}
