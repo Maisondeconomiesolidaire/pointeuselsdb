@@ -185,7 +185,7 @@ export const deleteEmployee = mutation({
 
 const clientFields = {
   name: v.string(),
-  clientType: v.union(v.literal("interne"), v.literal("externe")),
+  clientType: v.optional(v.union(v.literal("interne"), v.literal("externe"))),
   contactName: v.optional(v.string()),
   email: v.optional(v.string()),
   phone: v.optional(v.string()),
@@ -220,7 +220,7 @@ export const createClient = mutation({
     return await ctx.db.insert("ptClients", {
       ...args,
       name: args.name.trim(),
-      clientType: args.clientType,
+      clientType: args.clientType ?? "externe",
       createdAt: Date.now(),
     });
   },
@@ -233,7 +233,7 @@ export const updateClient = mutation({
     await ctx.db.patch(clientId, {
       ...patch,
       name: patch.name.trim(),
-      clientType: patch.clientType,
+      clientType: patch.clientType ?? "externe",
     });
   },
 });
@@ -289,10 +289,11 @@ export const listProjects = query({
       [INVOICES_PAGE_KEY, "read"],
       [INVOICES_PAGE_KEY, "create"],
     ]);
-    const [projects, clients, entries] = await Promise.all([
+    const [projects, clients, entries, expenses] = await Promise.all([
       ctx.db.query("ptProjects").order("desc").collect(),
       ctx.db.query("ptClients").collect(),
       ctx.db.query("ptTimeEntries").collect(),
+      ctx.db.query("ptExpenses").collect(),
     ]);
     const clientById = new Map(
       clients.map((client) => [
@@ -316,12 +317,20 @@ export const listProjects = query({
       };
       current.entriesCount += 1;
       current.totalPointed += entry.totalCost;
-      if (isEntryBilled(entry.billingStatus)) {
+      if ((entry.billingStatus ?? "a_facturer") === "facture") {
         current.billedPointed += entry.totalCost;
       } else {
         current.toBillPointed += entry.totalCost;
       }
       totalsByProject.set(entry.projectId, current);
+    }
+    const expenseTotalByProject = new Map<string, number>();
+    for (const expense of expenses) {
+      if (!expense.projectId) continue;
+      expenseTotalByProject.set(
+        expense.projectId,
+        (expenseTotalByProject.get(expense.projectId) ?? 0) + expense.amount,
+      );
     }
 
     return projects
@@ -332,15 +341,18 @@ export const listProjects = query({
           billedPointed: 0,
           toBillPointed: 0,
         };
+        const client = clientById.get(p.clientId);
+        const totalExpenses = round2(expenseTotalByProject.get(p._id) ?? 0);
         return {
           ...p,
-          clientName: clientById.get(p.clientId)?.name ?? "—",
-          clientType: clientById.get(p.clientId)?.clientType ?? "externe",
+          clientName: client?.name ?? "—",
+          clientType: client?.clientType ?? "externe",
           travelRatePerKm: p.travelRatePerKm ?? DEFAULT_TRAVEL_RATE_PER_KM,
           entriesCount: totals.entriesCount,
           totalPointed: round2(totals.totalPointed),
           billedPointed: round2(totals.billedPointed),
-          toBillPointed: round2(totals.toBillPointed),
+          totalExpenses,
+          toBillPointed: round2(totals.toBillPointed + totalExpenses),
         };
       })
       .sort((a, b) => a.name.localeCompare(b.name, "fr"));
