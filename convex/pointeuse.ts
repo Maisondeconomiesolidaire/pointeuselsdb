@@ -37,24 +37,6 @@ const SUPPLIERS_PAGE_KEY = "pointeuse:fournisseurs";
 const EXPENSES_PAGE_KEY = "pointeuse:depenses";
 const INVOICES_PAGE_KEY = "pointeuse:factures";
 
-function normalizeBillingStatus(
-  status: string | undefined | null,
-): "a_facturer" | "facture" {
-  if (!status) return "a_facturer";
-  const normalized = status
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .trim()
-    .toLowerCase();
-  return normalized === "facture" || normalized === "facturee" || normalized === "billed"
-    ? "facture"
-    : "a_facturer";
-}
-
-function isEntryBilled(status: string | undefined | null) {
-  return normalizeBillingStatus(status) === "facture";
-}
-
 /* ─── Salariés ────────────────────────────────────────────────────────────── */
 
 const employeeStatus = v.union(
@@ -121,58 +103,6 @@ export const updateEmployee = mutation({
   },
 });
 
-export const updateEmployeeRateAndRecomputeEntries = mutation({
-  args: {
-    employeeId: v.id("ptEmployees"),
-    hourlyRate: v.number(),
-  },
-  handler: async (ctx, { employeeId, hourlyRate }) => {
-    await requireCrmPermission(ctx, EMPLOYEES_PAGE_KEY, "update");
-    await requireCrmPermission(ctx, TIME_ENTRIES_PAGE_KEY, "update");
-
-    const employee = await ctx.db.get(employeeId);
-    if (!employee) throw new Error("Salarié introuvable.");
-
-    await ctx.db.patch(employeeId, { hourlyRate });
-
-    const entries = await ctx.db.query("ptTimeEntries").collect();
-    let updatedEntries = 0;
-
-    for (const entry of entries) {
-      let changed = false;
-      const lines = entry.lines.map((line) => {
-        if (line.employeeId !== employeeId) return line;
-        changed = true;
-        const cost = round2(line.hours * hourlyRate);
-        return {
-          ...line,
-          hourlyRate,
-          cost,
-        };
-      });
-
-      if (!changed) continue;
-
-      const laborCost = round2(lines.reduce((sum, line) => sum + line.cost, 0));
-      const totalCost = round2(laborCost + entry.travelCost);
-
-      await ctx.db.patch(entry._id, {
-        lines,
-        laborCost,
-        totalCost,
-      });
-      updatedEntries += 1;
-    }
-
-    return {
-      employeeId,
-      employeeName: `${employee.firstName} ${employee.lastName}`.trim(),
-      hourlyRate,
-      updatedEntries,
-    };
-  },
-});
-
 export const deleteEmployee = mutation({
   args: { employeeId: v.id("ptEmployees") },
   handler: async (ctx, { employeeId }) => {
@@ -204,12 +134,7 @@ export const listClients = query({
       [PROJECTS_PAGE_KEY, "update"],
     ]);
     const clients = await ctx.db.query("ptClients").order("desc").collect();
-    return clients
-      .map((client) => ({
-        ...client,
-        clientType: client.clientType ?? "externe",
-      }))
-      .sort((a, b) => a.name.localeCompare(b.name, "fr"));
+    return clients.sort((a, b) => a.name.localeCompare(b.name, "fr"));
   },
 });
 
@@ -220,7 +145,6 @@ export const createClient = mutation({
     return await ctx.db.insert("ptClients", {
       ...args,
       name: args.name.trim(),
-      clientType: args.clientType ?? "externe",
       createdAt: Date.now(),
     });
   },
@@ -230,11 +154,7 @@ export const updateClient = mutation({
   args: { clientId: v.id("ptClients"), ...clientFields },
   handler: async (ctx, { clientId, ...patch }) => {
     await requireCrmPermission(ctx, CLIENTS_PAGE_KEY, "update");
-    await ctx.db.patch(clientId, {
-      ...patch,
-      name: patch.name.trim(),
-      clientType: patch.clientType ?? "externe",
-    });
+    await ctx.db.patch(clientId, { ...patch, name: patch.name.trim() });
   },
 });
 
@@ -289,21 +209,12 @@ export const listProjects = query({
       [INVOICES_PAGE_KEY, "read"],
       [INVOICES_PAGE_KEY, "create"],
     ]);
-    const [projects, clients, entries, expenses] = await Promise.all([
+    const [projects, clients, entries] = await Promise.all([
       ctx.db.query("ptProjects").order("desc").collect(),
       ctx.db.query("ptClients").collect(),
       ctx.db.query("ptTimeEntries").collect(),
-      ctx.db.query("ptExpenses").collect(),
     ]);
-    const clientById = new Map(
-      clients.map((client) => [
-        client._id,
-        {
-          name: client.name,
-          clientType: client.clientType ?? "externe",
-        },
-      ]),
-    );
+    const clientById = new Map(clients.map((c) => [c._id, c]));
     const totalsByProject = new Map<
       string,
       { entriesCount: number; totalPointed: number; billedPointed: number; toBillPointed: number }
@@ -324,14 +235,6 @@ export const listProjects = query({
       }
       totalsByProject.set(entry.projectId, current);
     }
-    const expenseTotalByProject = new Map<string, number>();
-    for (const expense of expenses) {
-      if (!expense.projectId) continue;
-      expenseTotalByProject.set(
-        expense.projectId,
-        (expenseTotalByProject.get(expense.projectId) ?? 0) + expense.amount,
-      );
-    }
 
     return projects
       .map((p) => {
@@ -341,18 +244,15 @@ export const listProjects = query({
           billedPointed: 0,
           toBillPointed: 0,
         };
-        const client = clientById.get(p.clientId);
-        const totalExpenses = round2(expenseTotalByProject.get(p._id) ?? 0);
         return {
           ...p,
-          clientName: client?.name ?? "—",
-          clientType: client?.clientType ?? "externe",
+          clientName: clientById.get(p.clientId)?.name ?? "—",
+          clientType: clientById.get(p.clientId)?.clientType,
           travelRatePerKm: p.travelRatePerKm ?? DEFAULT_TRAVEL_RATE_PER_KM,
           entriesCount: totals.entriesCount,
           totalPointed: round2(totals.totalPointed),
           billedPointed: round2(totals.billedPointed),
-          totalExpenses,
-          toBillPointed: round2(totals.toBillPointed + totalExpenses),
+          toBillPointed: round2(totals.toBillPointed),
         };
       })
       .sort((a, b) => a.name.localeCompare(b.name, "fr"));
@@ -455,7 +355,7 @@ export const projectSummary = query({
     const travelCost = entries.reduce((s, e) => s + e.travelCost, 0);
     const totalPointed = entries.reduce((s, e) => s + e.totalCost, 0);
     const billedPointed = entries
-      .filter((e) => isEntryBilled(e.billingStatus))
+      .filter((e) => e.billingStatus === "facture")
       .reduce((s, e) => s + e.totalCost, 0);
     const totalExpenses = expenses.reduce((s, e) => s + e.amount, 0);
     const invoiced = invoices.reduce((s, i) => s + i.amount, 0);
@@ -468,7 +368,6 @@ export const projectSummary = query({
       documents.map(async (d) => ({
         ...d,
         kind: d.kind ?? "other",
-        supplierName: d.supplierId ? supplierName.get(d.supplierId) ?? null : null,
         url: await ctx.storage.getUrl(d.storageId),
       })),
     );
@@ -477,18 +376,12 @@ export const projectSummary = query({
       project: {
         ...project,
         clientName: client?.name ?? "—",
-        clientType: client?.clientType ?? "externe",
         travelRatePerKm: project.travelRatePerKm ?? DEFAULT_TRAVEL_RATE_PER_KM,
       },
-      client: client
-        ? {
-            ...client,
-            clientType: client.clientType ?? "externe",
-          }
-        : null,
+      client,
       entries: entries.map((entry) => ({
         ...entry,
-        billingStatus: normalizeBillingStatus(entry.billingStatus),
+        billingStatus: entry.billingStatus ?? "a_facturer",
         lines: entry.lines.map((line) => ({
           ...line,
           employeeName: employeeName.get(line.employeeId) ?? "—",
@@ -602,7 +495,7 @@ export const listTimeEntries = query({
 
     return entries.map((e) => ({
       ...e,
-      billingStatus: normalizeBillingStatus(e.billingStatus),
+      billingStatus: e.billingStatus ?? "a_facturer",
       projectName: projectName.get(e.projectId) ?? "—",
       clientName: clientName.get(e.clientId) ?? "—",
       lines: e.lines.map((l) => ({
@@ -955,7 +848,7 @@ export const getTimeEntry = query({
 
     return {
       ...entry,
-      billingStatus: normalizeBillingStatus(entry.billingStatus),
+      billingStatus: entry.billingStatus ?? "a_facturer",
       projectName: project?.name ?? "—",
       clientName: client?.name ?? "—",
       lines: entry.lines.map((line) => ({
@@ -989,20 +882,23 @@ export const clientSummary = query({
     const projectSummaries = projects.map((project) => {
       const projectEntries = entries.filter((entry) => entry.projectId === project._id);
       const projectInvoices = invoices.filter((invoice) => invoice.projectId === project._id);
-      const billedPointed = round2(
-        projectEntries
-          .filter((entry) => isEntryBilled(entry.billingStatus))
-          .reduce((sum, entry) => sum + entry.totalCost, 0),
-      );
-      const totalPointed = round2(
-        projectEntries.reduce((sum, entry) => sum + entry.totalCost, 0),
-      );
       return {
         ...project,
         travelRatePerKm: project.travelRatePerKm ?? DEFAULT_TRAVEL_RATE_PER_KM,
         entriesCount: projectEntries.length,
-        totalPointed,
-        toBillPointed: round2(totalPointed - billedPointed),
+        totalPointed: round2(
+          projectEntries.reduce((sum, entry) => sum + entry.totalCost, 0),
+        ),
+        billedPointed: round2(
+          projectEntries
+            .filter((entry) => (entry.billingStatus ?? "a_facturer") === "facture")
+            .reduce((sum, entry) => sum + entry.totalCost, 0),
+        ),
+        toBillPointed: round2(
+          projectEntries
+            .filter((entry) => (entry.billingStatus ?? "a_facturer") !== "facture")
+            .reduce((sum, entry) => sum + entry.totalCost, 0),
+        ),
         invoiced: round2(
           projectInvoices.reduce((sum, invoice) => sum + invoice.amount, 0),
         ),
@@ -1025,7 +921,7 @@ export const clientSummary = query({
     );
     const billedPointed = round2(
       clientEntries
-        .filter((entry) => isEntryBilled(entry.billingStatus))
+        .filter((entry) => entry.billingStatus === "facture")
         .reduce((sum, entry) => sum + entry.totalCost, 0),
     );
     const totalExpenses = 0;
@@ -1039,10 +935,7 @@ export const clientSummary = query({
     );
 
     return {
-      client: {
-        ...client,
-        clientType: client.clientType ?? "externe",
-      },
+      client,
       projects: projectSummaries.sort((a, b) => a.name.localeCompare(b.name, "fr")),
       invoices: clientInvoices.sort((a, b) => b.issuedAt - a.issuedAt),
       counts: {
@@ -1108,10 +1001,10 @@ export const dashboard = query({
     ]);
     const totalPointed = entries.reduce((s, e) => s + e.totalCost, 0);
     const billedPointed = entries
-      .filter((e) => isEntryBilled(e.billingStatus))
+      .filter((e) => e.billingStatus === "facture")
       .reduce((s, e) => s + e.totalCost, 0);
     const toBillCount = entries.filter(
-      (e) => !isEntryBilled(e.billingStatus),
+      (e) => (e.billingStatus ?? "a_facturer") !== "facture",
     ).length;
     const invoiced = invoices.reduce((s, i) => s + i.amount, 0);
     const paid = invoices
@@ -1261,7 +1154,6 @@ export const adminImportLegacyPointeuse = mutation({
       }
       const clientId = await ctx.db.insert("ptClients", {
         name: legacy.name.trim(),
-        clientType: "externe",
         ...(legacy.email ? { email: legacy.email.trim() } : {}),
         ...(legacy.phone ? { phone: legacy.phone.trim() } : {}),
         ...(legacy.address ? { address: legacy.address.trim() } : {}),
