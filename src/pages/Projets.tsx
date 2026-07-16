@@ -161,7 +161,7 @@ function ProjectList({ initialProjectId }: { initialProjectId?: Id<"ptProjects">
     return [...filtered].sort((a, b) => {
       switch (sortBy) {
         case "amount_asc":
-          return (a.toBillPointed ?? 0) - (b.toBillPointed ?? 0);
+          return (a.totalCost ?? 0) - (b.totalCost ?? 0);
         case "recent":
           return (b.createdAt ?? b._creationTime ?? 0) - (a.createdAt ?? a._creationTime ?? 0);
         case "oldest":
@@ -172,7 +172,7 @@ function ProjectList({ initialProjectId }: { initialProjectId?: Id<"ptProjects">
           return b.name.localeCompare(a.name, "fr");
         case "amount_desc":
         default:
-          return (b.toBillPointed ?? 0) - (a.toBillPointed ?? 0);
+          return (b.totalCost ?? 0) - (a.totalCost ?? 0);
       }
     });
   }, [activeClientId, projects, search, sortBy, typeFilter]);
@@ -333,11 +333,15 @@ function ProjectList({ initialProjectId }: { initialProjectId?: Id<"ptProjects">
           </div>
           <div className="mb-5 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
             <StatCard
-              label="Total projets"
+              label="Total à facturer"
               value={formatEuros(summary.totalCost)}
               hint={`${formatEuros(summary.totalPointed)} pointés · ${formatEuros(summary.totalExpenses)} dépenses`}
             />
-            <StatCard label="À facturer" value={formatEuros(summary.toBillPointed)} tone="amber" />
+            <StatCard
+              label="Reste à facturer"
+              value={formatEuros(summary.toBillPointed)}
+              tone="amber"
+            />
             <StatCard label="Facturé" value={formatEuros(summary.billedPointed)} tone="green" />
             <StatCard
               label="Projets visibles"
@@ -410,45 +414,14 @@ function ProjectList({ initialProjectId }: { initialProjectId?: Id<"ptProjects">
                               {project.postalCode} {project.city}
                             </p>
                           ) : null}
-                          <div className="mt-3 grid gap-2 sm:grid-cols-2">
-                            <div className="rounded-xl bg-[var(--accent)] px-3 py-2">
-                              <p className="text-[11px] font-medium uppercase tracking-wide text-[var(--muted-foreground)]">
-                                À facturer
-                              </p>
-                              <p
-                                className={cn(
-                                  "mt-1 text-lg font-semibold",
-                                  (project.toBillPointed ?? 0) > 0
-                                    ? "text-amber-600"
-                                    : "text-emerald-600",
-                                )}
-                              >
-                                {formatEuros(project.toBillPointed ?? 0)}
-                              </p>
-                            </div>
-                            <div className="rounded-xl bg-[var(--accent)] px-3 py-2">
-                              <p className="text-[11px] font-medium uppercase tracking-wide text-[var(--muted-foreground)]">
-                                Dépenses
-                              </p>
-                              <p className="mt-1 text-lg font-semibold text-[var(--foreground)]">
-                                {formatEuros(project.totalExpenses ?? 0)}
-                              </p>
-                            </div>
-                          </div>
-                          <div className="mt-2 rounded-xl border border-brand-200 bg-brand-50 px-3 py-2 dark:border-brand-500/30 dark:bg-brand-500/10">
-                            <div className="flex items-baseline justify-between gap-2">
-                              <p className="text-[11px] font-medium uppercase tracking-wide text-[var(--muted-foreground)]">
-                                Total projet
-                              </p>
-                              <p className="text-lg font-semibold text-[var(--foreground)]">
-                                {formatEuros(project.totalCost ?? 0)}
-                              </p>
-                            </div>
-                            <p className="mt-0.5 text-[11px] text-[var(--muted-foreground)]">
-                              {formatEuros(project.laborCost ?? 0)} pointages +{" "}
-                              {formatEuros(project.travelCost ?? 0)} déplacements +{" "}
-                              {formatEuros(project.totalExpenses ?? 0)} dépenses
-                            </p>
+                          <div className="mt-3 grid grid-cols-2 gap-2">
+                            <CostTile
+                              label="Total à facturer"
+                              value={project.totalCost ?? 0}
+                            />
+                            <CostTile label="Pointages" value={project.laborCost ?? 0} />
+                            <CostTile label="Dépenses" value={project.totalExpenses ?? 0} />
+                            <CostTile label="Déplacements" value={project.travelCost ?? 0} />
                           </div>
                           <p className="mt-3 text-xs text-[var(--muted-foreground)]">
                             {project.entriesCount} pointage{project.entriesCount > 1 ? "s" : ""} ·{" "}
@@ -587,14 +560,10 @@ function ProjectDetailModal({
           {tab === "details" ? (
             <div className="space-y-5">
               <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-                <StatCard label="Coût main-d'œuvre" value={formatEuros(totals.laborCost)} />
-                <StatCard label="Déplacements" value={formatEuros(totals.travelCost)} />
+                <StatCard label="Total à facturer" value={formatEuros(totals.totalCost)} />
+                <StatCard label="Pointages" value={formatEuros(totals.laborCost)} />
                 <StatCard label="Dépenses" value={formatEuros(totals.totalExpenses)} />
-                <StatCard
-                  label="Total projet"
-                  value={formatEuros(totals.totalCost)}
-                  hint="Pointages + déplacements + dépenses"
-                />
+                <StatCard label="Déplacements" value={formatEuros(totals.travelCost)} />
               </div>
               <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
                 <StatCard
@@ -606,7 +575,9 @@ function ProjectDetailModal({
               <Section title="Facturation des pointages">
                 <div className="flex flex-wrap gap-x-8 gap-y-2">
                   <div>
-                    <p className="text-xs uppercase text-[var(--muted-foreground)]">À facturer</p>
+                    <p className="text-xs uppercase text-[var(--muted-foreground)]">
+                      Reste à facturer
+                    </p>
                     <p className="mt-0.5 text-lg font-semibold text-amber-600">
                       {formatEuros(totals.toBillPointed)}
                     </p>
@@ -1157,6 +1128,24 @@ function CommercialDocuments({
         </div>
       )}
     </Section>
+  );
+}
+
+/**
+ * Tuile de montant d'une card projet. Volontairement sans couleur d'accent :
+ * les quatre tuiles (total et ses composantes) doivent se lire comme un seul
+ * bloc, sans qu'une couleur laisse croire que l'une d'elles est le total.
+ */
+function CostTile({ label, value }: { label: string; value: number }) {
+  return (
+    <div className="rounded-xl bg-[var(--accent)] px-3 py-2">
+      <p className="text-[11px] font-medium uppercase tracking-wide text-[var(--muted-foreground)]">
+        {label}
+      </p>
+      <p className="mt-1 text-lg font-semibold text-[var(--foreground)]">
+        {formatEuros(value)}
+      </p>
+    </div>
   );
 }
 
