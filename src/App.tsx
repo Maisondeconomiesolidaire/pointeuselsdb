@@ -34,6 +34,7 @@ import { api } from "../convex/_generated/api";
 import { cn } from "./lib/cn";
 import { FullSpinner } from "./components/ui/Spinner";
 import { AppSwitcher } from "./components/AppSwitcher";
+import { HelpButton } from "./components/HelpButton";
 import { Dashboard } from "./pages/Dashboard";
 import { Pointages } from "./pages/Pointages";
 import { Projets } from "./pages/Projets";
@@ -317,6 +318,8 @@ function AppLayout({ access }: { access: Access }) {
           </aside>
         </div>
       ) : null}
+
+      <HelpButton />
 
       <main
         key={location.pathname}
