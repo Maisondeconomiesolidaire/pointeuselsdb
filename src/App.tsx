@@ -64,7 +64,7 @@ function Sidebar({
   setTheme,
   currentPath,
   userName,
-  userEmail,
+  points,
   userImage,
   navItems,
 }: {
@@ -73,7 +73,7 @@ function Sidebar({
   setTheme: (theme: "light" | "dark") => void;
   currentPath: string;
   userName: string;
-  userEmail?: string;
+  points: number;
   userImage?: string | null;
   navItems: typeof NAV;
 }) {
@@ -138,7 +138,7 @@ function Sidebar({
             <UserAvatar name={userName} src={userImage} />
             <div className="min-w-0">
               <p className="truncate text-sm font-semibold text-[var(--foreground)]">{userName}</p>
-              <p className="truncate text-xs text-[var(--muted-foreground)]">{userEmail}</p>
+              <span className="inline-flex items-center gap-1 rounded-full bg-brand-100 px-2 py-0.5 text-xs font-bold text-brand-700">{points} pts <span title="Les points récompensent vos réservations, retours et participations utiles.">?</span></span>
             </div>
           </Link>
           <SignOutButton />
@@ -261,8 +261,8 @@ function AppLayout({ access }: { access: Access }) {
   const [theme, setTheme] = useTheme();
   const { user } = useUser();
   const location = useLocation();
-  const userName = user?.fullName ?? user?.primaryEmailAddress?.emailAddress ?? "Moi";
-  const userEmail = user?.primaryEmailAddress?.emailAddress;
+  const userName = user?.firstName ?? user?.fullName ?? user?.primaryEmailAddress?.emailAddress ?? "Moi";
+  const points = useQuery(api.points.myPoints, {}) ?? 100;
   const navItems = NAV.filter((item) => canAccess(access, item.pageKey));
 
   const sidebar = (
@@ -271,7 +271,7 @@ function AppLayout({ access }: { access: Access }) {
       setTheme={setTheme}
       currentPath={location.pathname}
       userName={userName}
-      userEmail={userEmail}
+      points={points}
       userImage={user?.imageUrl}
       navItems={navItems}
       onNavigate={() => setMobileOpen(false)}
