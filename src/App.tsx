@@ -138,7 +138,7 @@ function Sidebar({
             <UserAvatar name={userName} src={userImage} />
             <div className="min-w-0">
               <p className="truncate text-sm font-semibold text-[var(--foreground)]">{userName}</p>
-              <span className="inline-flex items-center gap-1 rounded-full bg-brand-100 px-2 py-0.5 text-xs font-bold text-brand-700">{points} pts <span title="Les points récompensent vos réservations, retours et participations utiles.">?</span></span>
+              <span className="inline-flex items-center gap-1 rounded-full bg-brand-100 px-2 py-0.5 text-xs font-bold text-brand-700">{points} pts <span title="Les points récompensent vos réservations, retours et participations utiles. Ils pourront bientôt débloquer des cadeaux et des récompenses.">?</span></span>
             </div>
           </Link>
           <SignOutButton />
