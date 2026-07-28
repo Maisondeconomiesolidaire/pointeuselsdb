@@ -8,14 +8,18 @@ import {
   clerkIdForEmail,
   emailForClerkId,
   fetchInternalClerkDirectory,
+  formatUserName,
   hasCrmPermission,
   isReservationParticipant,
   photoForClerkId,
+  MANDATORY_RETURN_SINCE,
   requireCrmPermission,
   requireUser,
+  vehicleReservationBusyEnd,
 } from "./lib";
 import { vehicleBusyReason } from "./fleet";
 import { createMesoutilsNotification } from "./mesoutilsNotifications";
+import { awardEngagementPoints } from "./points";
 
 /** Photo de profil de l'identité Clerk courante, si présente. */
 function pictureUrl(identity: unknown): string | undefined {
@@ -85,11 +89,7 @@ function displayName(identity: {
   familyName?: string | null;
   email?: string | null;
 }) {
-  const fullName = [identity.givenName, identity.familyName]
-    .filter(Boolean)
-    .join(" ")
-    .trim();
-  return identity.name?.trim() || fullName || identity.email?.trim() || "Utilisateur";
+  return formatUserName(identity);
 }
 
 function normalizeVehicleKind(kind: string) {
@@ -117,8 +117,67 @@ async function approvedReservationsForVehicle(
     .query("vehicleReservations")
     .withIndex("by_vehicleId", (q) => q.eq("vehicleId", vehicleId))
     .collect();
-  return reservations.filter((reservation) => reservation.status === "approved");
+  // Un retour enregistré clôt la réservation opérationnellement : elle reste
+  // dans l'historique, mais ne doit plus jamais entrer dans les conflits de
+  // disponibilité, quelle que soit l'heure à laquelle le formulaire a été
+  // envoyé.
+  return reservations.filter(
+    (reservation) => reservation.status === "approved" && !reservation.feedbackSubmittedAt,
+  );
 }
+
+/**
+ * Réservations de véhicule dont le retour est dû mais pas fait : approuvées,
+ * créneau terminé, aucun retour enregistré.
+ *
+ * Le retour conditionne la libération du véhicule ; tant qu'il manque, la
+ * flotte est fausse pour tout le monde. On bloque donc toute nouvelle
+ * réservation de la personne concernée jusqu'à régularisation.
+ *
+ * On interroge les deux index (réservataire et bénéficiaire d'une réservation
+ * faite pour quelqu'un d'autre) plutôt que de scanner la table.
+ */
+async function overdueVehicleReturnsFor(ctx: QueryCtx | MutationCtx, clerkId: string) {
+  const [own, onBehalf] = await Promise.all([
+    ctx.db
+      .query("vehicleReservations")
+      .withIndex("by_clerkId", (q) => q.eq("clerkId", clerkId))
+      .collect(),
+    ctx.db
+      .query("vehicleReservations")
+      .withIndex("by_bookedForClerkId", (q) => q.eq("bookedForClerkId", clerkId))
+      .collect(),
+  ]);
+  const byId = new Map([...own, ...onBehalf].map((reservation) => [String(reservation._id), reservation]));
+  const now = Date.now();
+  return [...byId.values()].filter(
+    (reservation) =>
+      reservation.status === "approved" &&
+      !reservation.feedbackSubmittedAt &&
+      reservation.end < now &&
+      reservation.end >= MANDATORY_RETURN_SINCE,
+  );
+}
+
+/** Retours en retard de l'utilisateur courant — bannière et blocage côté UI. */
+export const myOverdueVehicleReturns = query({
+  args: {},
+  handler: async (ctx) => {
+    const identity = await requireUser(ctx);
+    const overdue = await overdueVehicleReturnsFor(ctx, identity.subject);
+    const vehicles = await ctx.db.query("vehicles").collect();
+    const vehicleName = new Map(vehicles.map((vehicle) => [String(vehicle._id), vehicle.name]));
+    return overdue
+      .map((reservation) => ({
+        _id: String(reservation._id),
+        vehicleName: vehicleName.get(String(reservation.vehicleId)) ?? "Véhicule",
+        purpose: reservation.purpose,
+        start: reservation.start,
+        end: reservation.end,
+      }))
+      .sort((a, b) => a.end - b.end);
+  },
+});
 
 async function lastRecordedMileageForVehicle(
   ctx: QueryCtx | MutationCtx,
@@ -334,6 +393,11 @@ export const bookRoom = mutation({
       status: "confirmed",
       createdAt: Date.now(),
     });
+    await awardEngagementPoints(ctx, {
+      clerkId: target.clerkId ?? identity.subject,
+      displayName: target.name,
+      eventKey: `room-reservation:${reservationId}`,
+    });
     await createMesoutilsNotification(ctx, {
       recipientClerkId: target.clerkId ?? identity.subject,
       kind: "room_reservation_confirmed",
@@ -434,7 +498,12 @@ async function isVehicleFree(
     if (await vehicleBusyReason(ctx, vehicleId, cursor, { ignoreReservations: true })) return false;
   }
   const approved = await approvedReservationsForVehicle(ctx, vehicleId);
-  if (approved.some((reservation) => overlaps(reservation.start, reservation.end, start, end))) {
+  const now = Date.now();
+  if (
+    approved.some((reservation) =>
+      overlaps(reservation.start, vehicleReservationBusyEnd(reservation, now), start, end),
+    )
+  ) {
     return false;
   }
   return true;
@@ -513,8 +582,16 @@ export const listVehiclesForSlot = query({
     return await Promise.all(
       withPhotos.map(async (vehicle) => {
         const approved = await approvedReservationsForVehicle(ctx, vehicle._id);
+        const nowMs = Date.now();
         const conflict = approved
-          .filter((reservation) => overlaps(reservation.start, reservation.end, args.start, args.end))
+          .filter((reservation) =>
+            overlaps(
+              reservation.start,
+              vehicleReservationBusyEnd(reservation, nowMs),
+              args.start,
+              args.end,
+            ),
+          )
           .sort((a, b) => a.start - b.start)[0];
         let unavailableReason: string | null = null;
         if (!conflict && !(await isVehicleFree(ctx, vehicle._id, args.start, args.end))) {
@@ -523,7 +600,12 @@ export const listVehiclesForSlot = query({
         return {
           ...vehicle,
           occupiedBy: conflict
-            ? { userName: conflict.userName, start: conflict.start, end: conflict.end }
+            ? {
+                userName: conflict.userName,
+                start: conflict.start,
+                end: conflict.end,
+                returnRequired: conflict.end < nowMs && !conflict.feedbackSubmittedAt,
+              }
             : null,
           unavailableReason,
         };
@@ -588,11 +670,13 @@ export const listMyReservations = query({
     const identity = await requireUser(ctx);
     const me = identity.subject;
 
-    const [roomRes, vehicleRes, rooms, vehicles] = await Promise.all([
+    const [roomRes, vehicleRes, equipmentRes, rooms, vehicles, equipments] = await Promise.all([
       ctx.db.query("roomReservations").collect(),
       ctx.db.query("vehicleReservations").collect(),
+      ctx.db.query("equipmentReservations").collect(),
       ctx.db.query("rooms").collect(),
       ctx.db.query("vehicles").collect(),
+      ctx.db.query("equipments").collect(),
     ]);
     const roomInfo = new Map(
       await Promise.all(
@@ -618,6 +702,22 @@ export const listMyReservations = query({
                 name: vehicle.name,
                 photoUrl:
                   (vehicle.photo ? await ctx.storage.getUrl(vehicle.photo) : vehicle.photoUrl) ?? null,
+              },
+            ] as const,
+        ),
+      ),
+    );
+    const equipmentInfo = new Map(
+      await Promise.all(
+        equipments.map(
+          async (equipment) =>
+            [
+              String(equipment._id),
+              {
+                name: equipment.name,
+                photoUrl:
+                  (equipment.photo ? await ctx.storage.getUrl(equipment.photo) : equipment.photoUrl) ??
+                  null,
               },
             ] as const,
         ),
@@ -668,6 +768,24 @@ export const listMyReservations = query({
           feedbackSubmittedAt: reservation.feedbackSubmittedAt,
           lastRecordedMileage: lastMileageByVehicleId.get(String(reservation.vehicleId)),
         })),
+      // Les équipements se réservent depuis la même page que salles et
+      // véhicules : « Mes réservations » doit donc tout regrouper, sinon
+      // l'utilisateur n'aurait aucun endroit où retrouver ou annuler une
+      // réservation d'équipement.
+      ...equipmentRes
+        .filter((reservation) => reservation.clerkId === me || reservation.bookedForClerkId === me)
+        .map((reservation) => ({
+          _id: String(reservation._id),
+          kind: "equipment" as const,
+          assetName: equipmentInfo.get(String(reservation.equipmentId))?.name ?? "Équipement",
+          photoUrl: equipmentInfo.get(String(reservation.equipmentId))?.photoUrl ?? null,
+          usageType: undefined as "pro" | "personal" | undefined,
+          label: reservation.title,
+          start: reservation.start,
+          end: reservation.end,
+          status: reservation.status ?? ("confirmed" as const),
+          feedbackSubmittedAt: undefined as number | undefined,
+        })),
     ];
     return mine.sort((a, b) => b.start - a.start);
   },
@@ -694,8 +812,11 @@ export const submitVehicleFeedback = mutation({
     if (reservation.status !== "approved") {
       throw new Error("Le retour est disponible uniquement pour une réservation validée.");
     }
-    if (reservation.end > Date.now()) {
-      throw new Error("Le retour sera disponible après la fin de la réservation.");
+    // Aucune contrainte de date : c'est le retour qui libère le véhicule, donc
+    // il doit pouvoir être fait dès qu'on rapporte le véhicule — souvent avant
+    // la fin prévue. On refuse seulement un retour avant même le départ.
+    if (reservation.start > Date.now()) {
+      throw new Error("Le retour sera disponible une fois la réservation commencée.");
     }
     if (!Number.isFinite(args.mileage) || args.mileage < 0) {
       throw new Error("Kilométrage invalide.");
@@ -720,6 +841,76 @@ export const submitVehicleFeedback = mutation({
       feedbackVehicleClean: args.vehicleClean,
       feedbackIssues: args.issues?.trim() || undefined,
       feedbackNotes: args.notes?.trim() || undefined,
+    });
+    await awardEngagementPoints(ctx, {
+      clerkId: identity.subject,
+      displayName: displayName(identity),
+      eventKey: `vehicle-return:${args.reservationId}`,
+    });
+    // Chaque nouveau retour relance une synthèse qui tient compte de tout
+    // l'historique du véhicule et de ses éventuels problèmes récurrents.
+    await ctx.scheduler.runAfter(0, internal.vehicleRemarkAnalysis.analyze, {
+      vehicleId: reservation.vehicleId,
+    });
+  },
+});
+
+/**
+ * Libère manuellement un véhicule lorsqu'un utilisateur ne peut pas faire son
+ * retour. Réservé aux gestionnaires : l'opération est tracée sur la réservation.
+ */
+export const markVehicleReturned = mutation({
+  args: { reservationId: v.id("vehicleReservations") },
+  handler: async (ctx, { reservationId }) => {
+    await requireCrmPermission(ctx, PAGE_KEY, "manage");
+    const identity = await requireUser(ctx);
+    const reservation = await ctx.db.get(reservationId);
+    if (!reservation) throw new Error("Réservation introuvable.");
+    if (reservation.status !== "approved") {
+      throw new Error("Seule une réservation approuvée peut être clôturée.");
+    }
+    if (reservation.feedbackSubmittedAt) return;
+    const now = Date.now();
+    await ctx.db.patch(reservationId, {
+      feedbackSubmittedAt: now,
+      feedbackManualReturnAt: now,
+      feedbackManualReturnBy: displayName(identity),
+      feedbackNotes: [reservation.feedbackNotes, "Retour confirmé manuellement par l'équipe."].filter(Boolean).join("\n"),
+    });
+  },
+});
+
+/** Relance le demandeur d'une réservation terminée dont le retour manque encore. */
+export const remindVehicleReturn = mutation({
+  args: { reservationId: v.id("vehicleReservations") },
+  handler: async (ctx, { reservationId }) => {
+    await requireCrmPermission(ctx, PAGE_KEY, "manage");
+    const reservation = await ctx.db.get(reservationId);
+    if (!reservation) throw new Error("Réservation introuvable.");
+    if (reservation.status !== "approved" || reservation.end >= Date.now()) {
+      throw new Error("Seule une réservation approuvée et terminée peut être relancée.");
+    }
+    if (reservation.feedbackSubmittedAt) {
+      throw new Error("Le retour de cette réservation a déjà été effectué.");
+    }
+
+    const recipientClerkId = reservation.bookedForClerkId ?? reservation.clerkId;
+    const email = await emailForClerkId(ctx, recipientClerkId);
+    if (!email) throw new Error("Adresse e-mail introuvable pour cet utilisateur.");
+
+    const vehicle = await ctx.db.get(reservation.vehicleId);
+    const now = Date.now();
+    await ctx.db.patch(reservationId, { feedbackReminderSentAt: now });
+    await ctx.scheduler.runAfter(0, internal.mesoutilsEmails.sendVehicleFeedbackRequestEmail, {
+      email,
+      name: reservation.userName,
+      vehicleName: vehicle?.name ?? "Véhicule",
+      vehicleImageUrl:
+        (vehicle?.photo ? await ctx.storage.getUrl(vehicle.photo) : vehicle?.photoUrl) ??
+        undefined,
+      label: reservation.purpose,
+      start: reservation.start,
+      end: reservation.end,
     });
   },
 });
@@ -779,8 +970,8 @@ export const submitRoomFeedback = mutation({
     if (!isReservationParticipant(reservation, identity.subject)) {
       throw new Error("Retour non autorisé.");
     }
-    if (reservation.end > Date.now()) {
-      throw new Error("Le retour sera disponible après la fin de la réservation.");
+    if (reservation.start > Date.now()) {
+      throw new Error("Le retour sera disponible une fois la réservation commencée.");
     }
     await ctx.db.patch(args.reservationId, {
       feedbackSubmittedAt: Date.now(),
@@ -1025,6 +1216,19 @@ export const requestVehicle = mutation({
     await requireCrmPermission(ctx, PAGE_KEY, "create");
     const identity = await requireUser(ctx);
     ensureRange(args.start, args.end);
+
+    // Le retour est obligatoire : tant qu'il en manque un, plus aucune
+    // réservation. Vérifié ici et pas seulement côté UI, sinon la règle se
+    // contourne en rejouant la requête.
+    const overdueReturns = await overdueVehicleReturnsFor(ctx, identity.subject);
+    if (overdueReturns.length > 0) {
+      throw new Error(
+        overdueReturns.length === 1
+          ? "Vous avez un retour de véhicule à faire avant de pouvoir réserver à nouveau."
+          : `Vous avez ${overdueReturns.length} retours de véhicule à faire avant de pouvoir réserver à nouveau.`,
+      );
+    }
+
     const vehicle = await ctx.db.get(args.vehicleId);
     if (!vehicle || !vehicle.active) throw new Error("Véhicule indisponible.");
 
@@ -1068,6 +1272,11 @@ export const requestVehicle = mutation({
       end: args.end,
       status: "pending",
       createdAt: Date.now(),
+    });
+    await awardEngagementPoints(ctx, {
+      clerkId: target.clerkId ?? identity.subject,
+      displayName: target.name,
+      eventKey: `vehicle-reservation:${reservationId}`,
     });
 
     // Les responsables sont notifiés de chaque demande de réservation véhicule :

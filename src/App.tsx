@@ -21,6 +21,7 @@ import {
   FileText,
   FolderKanban,
   LayoutDashboard,
+  ListTodo,
   LogOut,
   Menu,
   Moon,
@@ -37,6 +38,7 @@ import { AppSwitcher } from "./components/AppSwitcher";
 import { HelpButton } from "./components/HelpButton";
 import { Dashboard } from "./pages/Dashboard";
 import { Pointages } from "./pages/Pointages";
+import { Taches } from "./pages/Taches";
 import { Projets } from "./pages/Projets";
 import { Clients } from "./pages/Clients";
 import { Salaries } from "./pages/Salaries";
@@ -48,6 +50,7 @@ import { UpdateAvailableBanner } from "./components/UpdateAvailableBanner";
 const NAV = [
   { to: "/", label: "Tableau de bord", icon: LayoutDashboard, end: true, pageKey: "pointeuse:dashboard" },
   { to: "/pointages", label: "Pointages", icon: ClipboardList, pageKey: "pointeuse:pointages" },
+  { to: "/taches", label: "Tâches", icon: ListTodo, pageKey: "pointeuse:taches" },
   { to: "/projets", label: "Projets", icon: FolderKanban, pageKey: "pointeuse:projets" },
   { to: "/clients", label: "Clients", icon: Building2, pageKey: "pointeuse:clients" },
   { to: "/salaries", label: "Salariés", icon: Users, pageKey: "pointeuse:salaries" },
@@ -328,6 +331,7 @@ function AppLayout({ access }: { access: Access }) {
         <Routes>
           <Route path="/" element={<RequirePage access={access} pageKey="pointeuse:dashboard"><Dashboard /></RequirePage>} />
           <Route path="/pointages" element={<RequirePage access={access} pageKey="pointeuse:pointages"><Pointages /></RequirePage>} />
+          <Route path="/taches" element={<RequirePage access={access} pageKey="pointeuse:taches"><Taches /></RequirePage>} />
           <Route path="/projets" element={<RequirePage access={access} pageKey="pointeuse:projets"><Projets /></RequirePage>} />
           <Route path="/projets/:projectId" element={<RequirePage access={access} pageKey="pointeuse:projets"><Projets /></RequirePage>} />
           <Route path="/clients" element={<RequirePage access={access} pageKey="pointeuse:clients"><Clients /></RequirePage>} />

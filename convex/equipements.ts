@@ -7,6 +7,7 @@ import {
   accessAllows,
   emailForClerkId,
   fetchInternalClerkDirectory,
+  formatUserName,
   hasCrmPermission,
   isReservationParticipant,
   photoForClerkId,
@@ -44,11 +45,7 @@ function displayName(identity: {
   familyName?: string | null;
   email?: string | null;
 }) {
-  const fullName = [identity.givenName, identity.familyName]
-    .filter(Boolean)
-    .join(" ")
-    .trim();
-  return identity.name?.trim() || fullName || identity.email?.trim() || "Utilisateur";
+  return formatUserName(identity);
 }
 
 async function userForClerkId(ctx: QueryCtx | MutationCtx, clerkId: string | undefined) {
@@ -359,7 +356,9 @@ export const bookEquipment = mutation({
       title: "Votre réservation d'équipement est confirmée",
       body: `${equipment.name} · ${args.title.trim()}`,
       assetImageUrl: equipmentImageUrl,
-      href: "/equipements?v=mine",
+      // « Mes réservations » vit désormais dans /reservations : /equipements
+      // ne sert plus qu'à gérer le parc.
+      href: "/reservations?v=mine",
     });
 
     const requesterName = target.name;

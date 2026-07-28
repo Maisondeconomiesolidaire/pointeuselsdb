@@ -15,6 +15,16 @@ export function titleCaseName(value: string): string {
     );
 }
 
+/** Nom à afficher pour une identité Clerk, homogène dans toutes les apps. */
+export function formatUserName(
+  identity: { name?: string | null; givenName?: string | null; familyName?: string | null; email?: string | null },
+  fallback = "Utilisateur",
+): string {
+  const fullName = [identity.givenName, identity.familyName].filter(Boolean).join(" ").trim();
+  const value = fullName || identity.name?.trim();
+  return value ? titleCaseName(value) : identity.email?.trim() || fallback;
+}
+
 /** Normalise une adresse email pour comparaison/rattachement (trim + minuscules). */
 export function normalizeEmail(email: string | null | undefined): string {
   return (email ?? "").trim().toLowerCase();
@@ -627,10 +637,54 @@ export async function fetchInternalClerkDirectory(
     if (self && email === self) continue;
     directory.push({
       clerkId,
-      name: [user.first_name, user.last_name].filter(Boolean).join(" ").trim() || email,
+      name: formatUserName({
+        givenName: user.first_name,
+        familyName: user.last_name,
+        name: user.username,
+        email,
+      }),
       imageUrl: typeof user.image_url === "string" ? user.image_url : null,
     });
   }
 
   return directory.sort((a, b) => a.name.localeCompare(b.name, "fr"));
 }
+
+/**
+ * Fin effective d'une réservation de véhicule, pour tout calcul de
+ * disponibilité.
+ *
+ * Un retour renseigné en avance libère immédiatement le véhicule. Sans retour,
+ * le créneau prévu reste la limite d'occupation : l'absence de formulaire de
+ * retour déclenche une relance, mais ne doit pas immobiliser toute la flotte
+ * après l'heure de fin annoncée.
+ *
+ * Règle unique pour les 7 apps : Mes Outils, recycapp et cycleenbray planifient
+ * les mêmes véhicules physiques.
+ */
+export function vehicleReservationBusyEnd(
+  reservation: { start: number; end: number; feedbackSubmittedAt?: number },
+  _now: number,
+) {
+  if (typeof reservation.feedbackSubmittedAt === "number") {
+    // Un retour peut être saisi après coup. Il libère donc plus tôt quand il
+    // est fait avant la fin prévue, mais ne doit jamais rallonger le créneau
+    // au-delà de son heure de fin (ex. fin à 11 h, formulaire envoyé à 14 h).
+    return Math.min(
+      reservation.end,
+      Math.max(reservation.start, reservation.feedbackSubmittedAt),
+    );
+  }
+  return reservation.end;
+}
+
+/**
+ * Entrée en vigueur du retour obligatoire.
+ *
+ * Les réservations terminées avant cette date n'ont jamais eu de retour à
+ * faire. Les compter rétroactivement bloquerait d'un coup 7 personnes et
+ * marquerait 11 véhicules « non rendus » dans les 3 apps qui planifient la
+ * flotte, pour une règle qui n'existait pas au moment de l'emprunt. La règle
+ * ne vaut donc que pour les emprunts qui se terminent après sa mise en service.
+ */
+export const MANDATORY_RETURN_SINCE = Date.parse("2026-07-20T00:00:00.000Z");
