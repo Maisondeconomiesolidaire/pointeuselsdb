@@ -8,7 +8,32 @@ export const requestType = v.union(
   v.literal("article"),
   v.literal("velo"),
   v.literal("livraison"),
+  v.literal("depot"),
 );
+
+/** Recyclerie où le client vient déposer ses objets. */
+export const depotSite = v.union(v.literal("60"), v.literal("76"));
+
+/** Véhicule annoncé pour le dépôt : conditionne le temps de déchargement. */
+export const depotVehicleType = v.union(
+  v.literal("voiture"),
+  v.literal("camionnette"),
+  v.literal("remorque"),
+);
+
+/**
+ * Rendez-vous de dépôt : une recyclerie, un créneau du lundi et le véhicule
+ * annoncé. `slotStart` est l'horodatage du début de créneau (unique par site).
+ */
+export const depotDetails = v.object({
+  site: depotSite,
+  slotStart: v.number(),
+  slotEnd: v.number(),
+  vehicleType: depotVehicleType,
+  description: v.optional(v.string()),
+  /** Rappel J-1 envoyé au client (évite le doublon si le cron repasse). */
+  reminderSentAt: v.optional(v.number()),
+});
 
 /** App « Feedback » — application visée par un retour utilisateur. */
 export const feedbackApp = v.union(
@@ -170,6 +195,7 @@ export const requestOutcome = v.union(
 export const requestLostReason = v.union(
   v.literal("devis_refuse"),
   v.literal("pas_de_retour_client"),
+  v.literal("annulation_client"),
   v.literal("autre"),
 );
 
@@ -469,6 +495,7 @@ export default defineSchema(
     payment: v.optional(requestPayment),
     velo: v.optional(veloDetails),
     livraison: v.optional(livraisonDetails),
+    depot: v.optional(depotDetails),
     // Véhicule de la flotte affecté (collecte / livraison planifiée).
     assignedVehicle: v.optional(v.id("vehicles")),
     createdAt: v.number(),
@@ -494,6 +521,22 @@ export default defineSchema(
     .index("by_scheduledDate", ["scheduledDate"])
     .index("by_assignedVehicle", ["assignedVehicle"])
     .index("by_reference", ["reference"]),
+
+  /**
+   * Créneaux de dépôt rendus indisponibles par l'équipe (fermeture, absence).
+   *
+   * Sans `slotStart`, c'est la journée entière qui est fermée pour ce site.
+   */
+  depotBlockedSlots: defineTable({
+    site: depotSite,
+    /** Jour concerné, `YYYY-MM-DD` en heure de Paris. */
+    date: v.string(),
+    slotStart: v.optional(v.number()),
+    createdAt: v.number(),
+    createdBy: v.string(),
+  })
+    .index("by_site", ["site"])
+    .index("by_site_and_date", ["site", "date"]),
 
   /** Prospects/clients importés hors demandes (Bubble, etc.). */
   crmCustomers: defineTable({
@@ -1125,6 +1168,9 @@ export default defineSchema(
     feedbackSubmittedAt: v.optional(v.number()),
     feedbackClean: v.optional(v.boolean()),
     feedbackTidy: v.optional(v.boolean()),
+    /** L'utilisateur a-t-il déclaré un incident ? Sans incident, le retour ne
+     * remonte pas dans la liste des remarques. */
+    feedbackIncident: v.optional(v.boolean()),
     feedbackIssues: v.optional(v.string()),
     feedbackNotes: v.optional(v.string()),
   })
@@ -1206,6 +1252,9 @@ export default defineSchema(
     feedbackFuelRestored: v.optional(v.boolean()),
     feedbackVehicleEmpty: v.optional(v.boolean()),
     feedbackVehicleClean: v.optional(v.boolean()),
+    /** L'utilisateur a-t-il déclaré un incident ? Sans incident, le retour ne
+     * remonte ni dans les remarques ni chez Mécania. */
+    feedbackIncident: v.optional(v.boolean()),
     feedbackIssues: v.optional(v.string()),
     feedbackNotes: v.optional(v.string()),
     /** Photos / vidéos jointes au retour pour illustrer un problème constaté. */
@@ -1572,6 +1621,8 @@ export default defineSchema(
       v.literal("en_cours_envoi"),
       v.literal("envoye"),
       v.literal("gagne"),
+      // Invendu en ligne : l'article repart en rayon à la boutique physique.
+      v.literal("magasin"),
       // Anciennes valeurs conservées pour les articles créés avant le suivi.
       v.literal("en_stock"),
       v.literal("reserve"),
@@ -1996,6 +2047,10 @@ export default defineSchema(
     webhookResponseBody: v.optional(v.string()),
     requestedAt: v.number(),
     requestedBy: v.string(),
+    /** Horodatage du dernier email de prévenance de fin de contrat. */
+    endNoticeSentAt: v.optional(v.number()),
+    /** Paliers de prévenance déjà envoyés (22, 15, 3 jours) — évite les doublons. */
+    endNoticeSentThresholds: v.optional(v.array(v.number())),
   })
     .index("by_employee_and_requestedAt", ["employeeId", "requestedAt"])
     .index("by_requestedAt", ["requestedAt"]),

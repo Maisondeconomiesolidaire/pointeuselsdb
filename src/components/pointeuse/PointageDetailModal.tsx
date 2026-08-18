@@ -3,6 +3,7 @@ import {
   BadgeCheck,
   ClipboardList,
   FileText,
+  Pencil,
   RotateCcw,
 } from "lucide-react";
 import { api } from "../../../convex/_generated/api";
@@ -18,9 +19,11 @@ import { useState } from "react";
 export function PointageDetailModal({
   entryId,
   onClose,
+  onEdit,
 }: {
   entryId: Id<"ptTimeEntries">;
   onClose: () => void;
+  onEdit?: () => void;
 }) {
   const entry = useQuery(api.pointeuse.getTimeEntry, { entryId });
   const updateBillingStatus = useMutation(api.pointeuse.updateTimeEntryBillingStatus);
@@ -175,6 +178,13 @@ export function PointageDetailModal({
           <Button variant="secondary" onClick={onClose}>
             Fermer
           </Button>
+          <div className="flex flex-col-reverse gap-2 sm:flex-row">
+          {onEdit ? (
+            <Button variant="secondary" onClick={onEdit}>
+              <Pencil className="h-4 w-4" />
+              Modifier
+            </Button>
+          ) : null}
           {entry.billingStatus === "facture" ? (
             <Button
               variant="secondary"
@@ -190,6 +200,7 @@ export function PointageDetailModal({
               {savingStatus ? "Mise à jour…" : "Marquer facturé"}
             </Button>
           )}
+          </div>
         </div>
       </div>
     </Modal>

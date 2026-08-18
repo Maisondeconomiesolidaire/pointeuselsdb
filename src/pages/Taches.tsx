@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
 import { useMutation, useQuery } from "convex/react";
-import { ArrowLeft, CheckCircle2, Clock, ListTodo, Plus, Trash2 } from "lucide-react";
+import { ArrowLeft, CheckCircle2, Clock, ListTodo, Pencil, Plus, Trash2 } from "lucide-react";
 import { api } from "../../convex/_generated/api";
 import type { Id } from "../../convex/_generated/dataModel";
 import { PageHeader } from "../components/ui/PageHeader";
@@ -20,6 +20,7 @@ export function Taches() {
   const tasks = useQuery(api.pointeuse.listTasks, {});
   const remove = useMutation(api.pointeuse.deleteTask);
   const [creating, setCreating] = useState(false);
+  const [editingId, setEditingId] = useState<Id<"ptTasks"> | null>(null);
   const [search, setSearch] = useState("");
 
   const filtered = useMemo(
@@ -32,6 +33,11 @@ export function Taches() {
         ]),
       ),
     [tasks, search],
+  );
+
+  const editingTask = useMemo(
+    () => (editingId ? (tasks ?? []).find((t) => t._id === editingId) : undefined),
+    [tasks, editingId],
   );
 
   return (
@@ -108,6 +114,14 @@ export function Taches() {
                       </span>
                       <button
                         type="button"
+                        onClick={() => setEditingId(t._id)}
+                        className="rounded-lg p-2 text-[var(--muted-foreground)] hover:bg-[var(--accent)] hover:text-brand-600"
+                        aria-label="Modifier"
+                      >
+                        <Pencil className="h-4 w-4" />
+                      </button>
+                      <button
+                        type="button"
                         onClick={async () => {
                           if (confirm("Supprimer cette tâche ?")) await remove({ taskId: t._id });
                         }}
@@ -152,29 +166,72 @@ export function Taches() {
       )}
 
       {creating && <TaskForm onClose={() => setCreating(false)} />}
+      {editingTask ? (
+        <TaskForm key={editingTask._id} task={editingTask} onClose={() => setEditingId(null)} />
+      ) : null}
     </div>
   );
 }
 
-function TaskForm({ onClose }: { onClose: () => void }) {
+type TaskItem = NonNullable<ReturnType<typeof useQuery<typeof api.pointeuse.listTasks>>>[number];
+
+function TaskForm({ task, onClose }: { task?: TaskItem; onClose: () => void }) {
   const projects = useQuery(api.pointeuse.listProjects);
   const employees = useQuery(api.pointeuse.listEmployees);
   const createTask = useMutation(api.pointeuse.createTask);
+  const updateTask = useMutation(api.pointeuse.updateTask);
+  const editing = task !== undefined;
 
   const [step, setStep] = useState<1 | 2>(1);
-  const [projectId, setProjectId] = useState<string>("");
-  const [date, setDate] = useState(toDateInputValue(Date.now()));
-  const [travelDone, setTravelDone] = useState(false);
-  const [lines, setLines] = useState<Record<string, string>>({});
-  const [roundTrips, setRoundTrips] = useState("");
-  const [notes, setNotes] = useState("");
+  const [projectId, setProjectId] = useState<string>(task?.projectId ?? "");
+  const [date, setDate] = useState(toDateInputValue(task?.date ?? Date.now()));
+  const [travelDone, setTravelDone] = useState((task?.travel?.roundTrips ?? 0) > 0);
+  const [lines, setLines] = useState<Record<string, string>>(() =>
+    Object.fromEntries(
+      (task?.assignments ?? []).map((a) => [a.employeeId, String(a.estimatedHours)]),
+    ),
+  );
+  const [realHours, setRealHours] = useState<Record<string, string>>(() =>
+    Object.fromEntries(
+      (task?.assignments ?? [])
+        .filter((a) => a.confirmed)
+        .map((a) => [a.employeeId, String(a.confirmedHours ?? "")]),
+    ),
+  );
+  const [roundTrips, setRoundTrips] = useState(
+    task?.travel?.roundTrips ? String(task.travel.roundTrips) : "",
+  );
+  const [notes, setNotes] = useState(task?.notes ?? "");
   const [photos, setPhotos] = useState<PickedPhoto[]>([]);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const activeEmployees = useMemo(() => (employees ?? []).filter((e) => e.active), [employees]);
+  // Un salarié déjà affecté reste modifiable même s'il a été désactivé depuis.
+  const assignedIds = useMemo(
+    () => new Set((task?.assignments ?? []).map((a) => a.employeeId as string)),
+    [task],
+  );
+  const selectableEmployees = useMemo(
+    () => (employees ?? []).filter((e) => e.active || assignedIds.has(e._id)),
+    [employees, assignedIds],
+  );
+  // Les taux figés à la création de la tâche priment sur le taux courant.
+  const snapshotRate = useMemo(
+    () => new Map((task?.assignments ?? []).map((a) => [a.employeeId as string, a.hourlyRate])),
+    [task],
+  );
+  const rateOf = (employeeId: string, fallback: number) =>
+    snapshotRate.get(employeeId) ?? fallback;
+
   const project = (projects ?? []).find((p) => p._id === projectId) ?? null;
-  const travelRatePerKm = project?.travelRatePerKm ?? 1;
+  const travelRatePerKm =
+    (editing && projectId === task?.projectId ? task?.travel?.ratePerKm : undefined) ??
+    project?.travelRatePerKm ??
+    1;
+  const distanceKm =
+    (editing && projectId === task?.projectId ? task?.travel?.distanceKm : undefined) ??
+    project?.distanceKm ??
+    0;
   const projectOptions = useMemo(
     () => [
       { value: "", label: "Sélectionner" },
@@ -184,18 +241,19 @@ function TaskForm({ onClose }: { onClose: () => void }) {
   );
 
   const computedLines = useMemo(() => {
-    return activeEmployees
+    return selectableEmployees
       .map((e) => {
         const hours = Number(lines[e._id]) || 0;
-        return { employee: e, hours, cost: round2(hours * e.hourlyRate) };
+        const hourlyRate = rateOf(e._id, e.hourlyRate);
+        return { employee: e, hours, hourlyRate, cost: round2(hours * hourlyRate) };
       })
       .filter((l) => l.hours > 0);
-  }, [activeEmployees, lines]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectableEmployees, lines, snapshotRate]);
 
   const laborCost = round2(computedLines.reduce((s, l) => s + l.cost, 0));
   const trips = Number(roundTrips) || 0;
-  const travelCost =
-    project && trips > 0 ? round2(trips * project.distanceKm * 2 * travelRatePerKm) : 0;
+  const travelCost = trips > 0 ? round2(trips * distanceKm * 2 * travelRatePerKm) : 0;
   const totalCost = round2(laborCost + travelCost);
 
   function goStep2() {
@@ -219,17 +277,39 @@ function TaskForm({ onClose }: { onClose: () => void }) {
     setSaving(true);
     setError(null);
     try {
-      await createTask({
-        projectId: projectId as Id<"ptProjects">,
-        date: parseDateInput(date),
-        assignments: computedLines.map((l) => ({
-          employeeId: l.employee._id,
-          estimatedHours: l.hours,
-        })),
-        roundTrips: travelDone && trips > 0 ? trips : undefined,
-        notes: notes || undefined,
-        documentIds: photos.map((photo) => photo.id),
-      });
+      if (editing && task) {
+        await updateTask({
+          taskId: task._id,
+          projectId: projectId as Id<"ptProjects">,
+          date: parseDateInput(date),
+          assignments: computedLines.map((l) => {
+            const raw = realHours[l.employee._id];
+            const confirmed = raw === undefined || raw === "" ? undefined : Number(raw);
+            return {
+              employeeId: l.employee._id,
+              estimatedHours: l.hours,
+              confirmedHours:
+                confirmed !== undefined && Number.isFinite(confirmed) && confirmed >= 0
+                  ? confirmed
+                  : undefined,
+            };
+          }),
+          roundTrips: travelDone && trips > 0 ? trips : 0,
+          notes: notes || "",
+        });
+      } else {
+        await createTask({
+          projectId: projectId as Id<"ptProjects">,
+          date: parseDateInput(date),
+          assignments: computedLines.map((l) => ({
+            employeeId: l.employee._id,
+            estimatedHours: l.hours,
+          })),
+          roundTrips: travelDone && trips > 0 ? trips : undefined,
+          notes: notes || undefined,
+          documentIds: photos.map((photo) => photo.id),
+        });
+      }
       onClose();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Erreur");
@@ -239,28 +319,37 @@ function TaskForm({ onClose }: { onClose: () => void }) {
   }
 
   return (
-    <Modal open onClose={onClose} title="Nouvelle tâche" className="sm:h-auto sm:max-w-2xl">
+    <Modal
+      open
+      onClose={onClose}
+      title={editing ? "Modifier la tâche" : "Nouvelle tâche"}
+      className="sm:h-auto sm:max-w-2xl"
+    >
       <div className="mb-5 grid gap-2 text-sm sm:grid-cols-2">
-        <div
+        <button
+          type="button"
+          onClick={() => setStep(1)}
           className={cn(
-            "rounded-lg border px-3 py-2",
+            "rounded-lg border px-3 py-2 text-left",
             step === 1
               ? "border-brand-300 bg-brand-500/10 text-[var(--foreground)]"
               : "border-[var(--border)] text-[var(--muted-foreground)]",
           )}
         >
           <span className="font-semibold">1.</span> Projet
-        </div>
-        <div
+        </button>
+        <button
+          type="button"
+          onClick={goStep2}
           className={cn(
-            "rounded-lg border px-3 py-2",
+            "rounded-lg border px-3 py-2 text-left",
             step === 2
               ? "border-brand-300 bg-brand-500/10 text-[var(--foreground)]"
               : "border-[var(--border)] text-[var(--muted-foreground)]",
           )}
         >
           <span className="font-semibold">2.</span> Salariés affectés
-        </div>
+        </button>
       </div>
 
       {step === 1 ? (
@@ -277,7 +366,7 @@ function TaskForm({ onClose }: { onClose: () => void }) {
           {project ? (
             <p className="rounded-lg bg-[var(--accent)] px-3 py-2 text-sm text-[var(--muted-foreground)]">
               Client : <strong className="text-[var(--foreground)]">{project.clientName}</strong> ·
-              Distance base → chantier : {project.distanceKm} km · {travelRatePerKm.toFixed(2)} €/km
+              Distance base → chantier : {distanceKm} km · {travelRatePerKm.toFixed(2)} €/km
             </p>
           ) : null}
 
@@ -322,8 +411,8 @@ function TaskForm({ onClose }: { onClose: () => void }) {
               required
               hint={
                 project
-                  ? `1 déplacement = ${project.distanceKm} km × 2 × ${travelRatePerKm} €/km = ${formatEuros(
-                      project.distanceKm * 2 * travelRatePerKm,
+                  ? `1 déplacement = ${distanceKm} km × 2 × ${travelRatePerKm} €/km = ${formatEuros(
+                      distanceKm * 2 * travelRatePerKm,
                     )}`
                   : "Sélectionnez un projet pour le calcul"
               }
@@ -357,44 +446,77 @@ function TaskForm({ onClose }: { onClose: () => void }) {
           </button>
 
           <div>
-            <p className="mb-2 text-sm font-medium text-[var(--foreground)]">
+            <p className="mb-1 text-sm font-medium text-[var(--foreground)]">
               Salariés affectés et temps estimé
             </p>
-            {activeEmployees.length === 0 ? (
+            <p className="mb-2 text-xs text-[var(--muted-foreground)]">
+              {editing
+                ? "Mettez un temps estimé à 0 (ou videz le champ) pour retirer un salarié de la tâche."
+                : "Renseignez un temps estimé pour chaque salarié à affecter."}
+            </p>
+            {selectableEmployees.length === 0 ? (
               <p className="text-sm text-[var(--muted-foreground)]">
                 Aucun salarié actif. Ajoutez-en dans « Salariés ».
               </p>
             ) : (
               <div className="space-y-2">
-                {activeEmployees.map((e) => {
+                {selectableEmployees.map((e) => {
+                  const hourlyRate = rateOf(e._id, e.hourlyRate);
                   const hours = Number(lines[e._id]) || 0;
+                  const assigned = hours > 0;
                   return (
                     <div
                       key={e._id}
-                      className="flex items-center gap-3 rounded-lg border border-[var(--border)] px-3 py-2"
+                      className={cn(
+                        "flex flex-wrap items-center gap-3 rounded-lg border px-3 py-2",
+                        assigned ? "border-brand-300 bg-brand-500/5" : "border-[var(--border)]",
+                      )}
                     >
                       <div className="min-w-0 flex-1">
                         <p className="truncate text-sm font-medium text-[var(--foreground)]">
                           {e.firstName} {e.lastName}
+                          {!e.active ? (
+                            <span className="ml-1.5 text-xs text-[var(--muted-foreground)]">
+                              (inactif)
+                            </span>
+                          ) : null}
                         </p>
                         <p className="text-xs text-[var(--muted-foreground)]">
-                          {e.status} · {formatEuros(e.hourlyRate)}/h
+                          {e.status} · {formatEuros(hourlyRate)}/h
                         </p>
                       </div>
-                      <input
-                        type="number"
-                        min="0"
-                        step="0.25"
-                        placeholder="0"
-                        value={lines[e._id] ?? ""}
-                        onChange={(ev) =>
-                          setLines((prev) => ({ ...prev, [e._id]: ev.target.value }))
-                        }
-                        className="h-9 w-20 rounded-lg border border-[var(--border)] bg-[var(--input)] px-2 text-right text-sm text-[var(--foreground)] focus:border-brand-500 focus:outline-none"
-                      />
-                      <span className="text-xs text-[var(--muted-foreground)]">h est.</span>
+                      <div className="flex items-center gap-1.5">
+                        <input
+                          type="number"
+                          min="0"
+                          step="0.25"
+                          placeholder="0"
+                          value={lines[e._id] ?? ""}
+                          onChange={(ev) =>
+                            setLines((prev) => ({ ...prev, [e._id]: ev.target.value }))
+                          }
+                          className="h-9 w-20 rounded-lg border border-[var(--border)] bg-[var(--input)] px-2 text-right text-sm text-[var(--foreground)] focus:border-brand-500 focus:outline-none"
+                        />
+                        <span className="text-xs text-[var(--muted-foreground)]">h est.</span>
+                      </div>
+                      {editing ? (
+                        <div className="flex items-center gap-1.5">
+                          <input
+                            type="number"
+                            min="0"
+                            step="0.25"
+                            placeholder="—"
+                            value={realHours[e._id] ?? ""}
+                            onChange={(ev) =>
+                              setRealHours((prev) => ({ ...prev, [e._id]: ev.target.value }))
+                            }
+                            className="h-9 w-20 rounded-lg border border-[var(--border)] bg-[var(--input)] px-2 text-right text-sm text-[var(--foreground)] focus:border-brand-500 focus:outline-none"
+                          />
+                          <span className="text-xs text-[var(--muted-foreground)]">h réelles</span>
+                        </div>
+                      ) : null}
                       <span className="w-20 text-right text-sm font-medium text-[var(--foreground)]">
-                        {formatEuros(round2(hours * e.hourlyRate))}
+                        {formatEuros(round2(hours * hourlyRate))}
                       </span>
                     </div>
                   );
@@ -403,13 +525,15 @@ function TaskForm({ onClose }: { onClose: () => void }) {
             )}
           </div>
 
-          <Field label="Images du chantier" hint="Optionnel">
-            <PhotoPicker
-              projectId={projectId ? (projectId as Id<"ptProjects">) : null}
-              photos={photos}
-              onChange={setPhotos}
-            />
-          </Field>
+          {editing ? null : (
+            <Field label="Images du chantier" hint="Optionnel">
+              <PhotoPicker
+                projectId={projectId ? (projectId as Id<"ptProjects">) : null}
+                photos={photos}
+                onChange={setPhotos}
+              />
+            </Field>
+          )}
 
           <Field label="Remarques" hint="Optionnel">
             <Textarea value={notes} onChange={(e) => setNotes(e.target.value)} />
@@ -422,7 +546,7 @@ function TaskForm({ onClose }: { onClose: () => void }) {
             <Row
               label={
                 travelDone
-                  ? `Déplacements (${trips} × ${project?.distanceKm ?? 0} km × 2 × ${travelRatePerKm} €/km)`
+                  ? `Déplacements (${trips} × ${distanceKm} km × 2 × ${travelRatePerKm} €/km)`
                   : "Déplacements"
               }
               value={formatEuros(travelCost)}
@@ -440,7 +564,11 @@ function TaskForm({ onClose }: { onClose: () => void }) {
               Retour
             </Button>
             <Button onClick={save} disabled={saving}>
-              {saving ? "Enregistrement…" : "Créer la tâche"}
+              {saving
+                ? "Enregistrement…"
+                : editing
+                  ? "Enregistrer les modifications"
+                  : "Créer la tâche"}
             </Button>
           </div>
         </div>

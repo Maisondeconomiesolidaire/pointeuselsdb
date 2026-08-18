@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
 import { useMutation, useQuery } from "convex/react";
-import { Check, CheckCircle2, ClipboardList, Clock, Trash2 } from "lucide-react";
+import { Check, CheckCircle2, ClipboardList, Clock, Pencil, Trash2 } from "lucide-react";
 import { api } from "../../convex/_generated/api";
 import type { Id } from "../../convex/_generated/dataModel";
 import { PageHeader } from "../components/ui/PageHeader";
@@ -8,6 +8,7 @@ import { EmptyState } from "../components/ui/EmptyState";
 import { FullSpinner } from "../components/ui/Spinner";
 import { SearchInput, matchesSearch } from "../components/ui/SearchInput";
 import { PointageDetailModal } from "../components/pointeuse/PointageDetailModal";
+import { TimeEntryEditModal } from "../components/pointeuse/TimeEntryEditModal";
 import { formatDate, formatEuros } from "../lib/format";
 import { cn } from "../lib/cn";
 
@@ -18,6 +19,7 @@ export function Pointages() {
   const updateBillingStatus = useMutation(api.pointeuse.updateTimeEntryBillingStatus);
   const [search, setSearch] = useState("");
   const [selectedEntryId, setSelectedEntryId] = useState<Id<"ptTimeEntries"> | null>(null);
+  const [editingEntryId, setEditingEntryId] = useState<Id<"ptTimeEntries"> | null>(null);
 
   // Tâches encore à confirmer (au moins une affectation sans temps réel).
   const tasksToConfirm = useMemo(
@@ -154,6 +156,17 @@ export function Pointages() {
                           </p>
                           <button
                             type="button"
+                            onClick={(ev) => {
+                              ev.stopPropagation();
+                              setEditingEntryId(e._id);
+                            }}
+                            className="rounded-lg p-2 text-[var(--muted-foreground)] hover:bg-[var(--accent)] hover:text-brand-600"
+                            aria-label="Modifier"
+                          >
+                            <Pencil className="h-4 w-4" />
+                          </button>
+                          <button
+                            type="button"
                             onClick={async (ev) => {
                               ev.stopPropagation();
                               if (confirm("Supprimer ce pointage ?")) await remove({ entryId: e._id });
@@ -191,6 +204,17 @@ export function Pointages() {
         <PointageDetailModal
           entryId={selectedEntryId}
           onClose={() => setSelectedEntryId(null)}
+          onEdit={() => {
+            setEditingEntryId(selectedEntryId);
+            setSelectedEntryId(null);
+          }}
+        />
+      ) : null}
+
+      {editingEntryId ? (
+        <TimeEntryEditModal
+          entryId={editingEntryId}
+          onClose={() => setEditingEntryId(null)}
         />
       ) : null}
     </div>
