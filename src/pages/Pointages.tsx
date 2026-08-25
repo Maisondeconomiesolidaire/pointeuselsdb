@@ -9,6 +9,7 @@ import { FullSpinner } from "../components/ui/Spinner";
 import { SearchInput, matchesSearch } from "../components/ui/SearchInput";
 import { PointageDetailModal } from "../components/pointeuse/PointageDetailModal";
 import { TimeEntryEditModal } from "../components/pointeuse/TimeEntryEditModal";
+import { AttachmentPicker, type PickedAttachment } from "../components/ui/AttachmentPicker";
 import { formatDate, formatEuros } from "../lib/format";
 import { cn } from "../lib/cn";
 
@@ -225,8 +226,21 @@ type TaskItem = NonNullable<ReturnType<typeof useQuery<typeof api.pointeuse.list
 
 function TaskConfirmCard({ task }: { task: TaskItem }) {
   const confirmHours = useMutation(api.pointeuse.confirmTaskHours);
+  const updateTaskDocuments = useMutation(api.pointeuse.updateTaskDocuments);
+  const documents = useQuery(api.pointeuse.documentsByIds, {
+    documentIds: task.documentIds,
+  });
   const [inputs, setInputs] = useState<Record<string, string>>({});
   const [savingId, setSavingId] = useState<string | null>(null);
+
+  // La carte est le seul écran de pointage sur le terrain : les pièces
+  // jointes y sont enregistrées à chaque ajout, sans bouton « Enregistrer ».
+  const attachments: PickedAttachment[] = (documents ?? []).map((document) => ({
+    id: document._id,
+    name: document.name,
+    mimeType: document.mimeType,
+    url: document.url,
+  }));
 
   async function confirm(employeeId: Id<"ptEmployees">, fallback: number) {
     const raw = inputs[employeeId];
@@ -301,6 +315,22 @@ function TaskConfirmCard({ task }: { task: TaskItem }) {
             )}
           </div>
         ))}
+      </div>
+
+      <div className="mt-3 border-t border-[var(--border)] pt-3">
+        <p className="mb-1.5 text-xs font-medium text-[var(--muted-foreground)]">
+          Pièces jointes
+        </p>
+        <AttachmentPicker
+          projectId={task.projectId}
+          attachments={attachments}
+          onChange={(next) =>
+            void updateTaskDocuments({
+              taskId: task._id,
+              documentIds: next.map((attachment) => attachment.id),
+            })
+          }
+        />
       </div>
 
       <div className="mt-3 flex flex-wrap gap-x-6 gap-y-1 border-t border-[var(--border)] pt-2 text-sm text-[var(--muted-foreground)]">

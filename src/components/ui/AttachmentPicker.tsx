@@ -81,11 +81,17 @@ export function AttachmentPicker({
 
   return (
     <div className="space-y-2">
+      {/*
+        `display:none` empêche Safari iOS d'ouvrir le sélecteur de fichiers
+        quand le clic vient du script : le champ est donc rendu, mais réduit à
+        un point transparent hors du flux.
+      */}
       <input
         ref={inputRef}
         type="file"
         multiple
-        className="hidden"
+        className="absolute h-px w-px opacity-0"
+        style={{ left: -9999, top: 0 }}
         onChange={(e) => void onFiles(e.target.files)}
       />
       <button
