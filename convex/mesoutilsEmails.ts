@@ -9,10 +9,18 @@ const FROM = "Mes Outils <no-reply@mesoutils.eco-solidaire.fr>";
 const BRAND = "#47c667";
 const BRAND_DARK = "#2fa855";
 
+/**
+ * L'intendance suit l'ensemble des réservations (véhicules, salles,
+ * équipements) : demandes, acceptations, refus et annulations. Elle est donc
+ * ajoutée aux listes de responsables et mise en copie cachée des emails
+ * envoyés aux demandeurs.
+ */
+export const INTENDANCE_EMAIL = "intendance@eco-solidaire.fr";
+
 /** Adresses des responsables notifiés des demandes de réservation de véhicule. */
 export const VEHICLE_REQUEST_MANAGER_EMAILS = [
   "f.henry@eco-solidaire.fr",
-  "y.prata@eco-solidaire.fr",
+  INTENDANCE_EMAIL,
 ];
 
 /** URL publique de l'app Mes Outils, pour les liens et le logo des emails. */
@@ -283,6 +291,8 @@ export const sendReservationEmail = internalAction({
       `${copy.subject} · ${args.assetName}`,
       html,
       FROM,
+      undefined,
+      { bcc: [INTENDANCE_EMAIL] },
     );
   },
 });
@@ -368,8 +378,8 @@ export const sendRoomFeedbackRequestEmail = internalAction({
 });
 
 /**
- * Notifie les responsables (f.henry / y.prata) d'une nouvelle demande de
- * réservation de véhicule, avec un lien direct vers la validation.
+ * Notifie les responsables d'une nouvelle demande de réservation de véhicule,
+ * avec un lien direct vers la validation.
  */
 export const sendVehicleRequestToManagers = internalAction({
   args: {
@@ -486,6 +496,7 @@ export const sendVehicleReservationManagerUpdate = internalAction({
 /** Adresses des responsables notifiés des réservations de salle. */
 export const ROOM_RESERVATION_MANAGER_EMAILS = [
   "a.still@eco-solidaire.fr",
+  INTENDANCE_EMAIL,
 ];
 
 /**
@@ -546,7 +557,9 @@ export const sendRecyclerieVehicleNotice = internalAction({
     const subject = approved
       ? `Réservation acceptée · ${args.vehicleName} (Recyclerie)`
       : `Demande de réservation · ${args.vehicleName} (Recyclerie)`;
-    await resendSend(RECYCLERIE_VEHICLE_NOTICE_EMAILS, subject, html, FROM);
+    await resendSend(RECYCLERIE_VEHICLE_NOTICE_EMAILS, subject, html, FROM, undefined, {
+      bcc: [INTENDANCE_EMAIL],
+    });
   },
 });
 
@@ -615,7 +628,12 @@ export const sendEquipmentReservationToManagers = internalAction({
     equipmentImageStorageId: v.optional(v.string()),
   },
   handler: async (_ctx, args) => {
-    if (args.recipients.length === 0) return;
+    // L'intendance suit aussi les réservations d'équipement, même si l'objet
+    // n'a pas de référent déclaré.
+    const recipients = Array.from(
+      new Set([...args.recipients, INTENDANCE_EMAIL].map((email) => email.trim()).filter(Boolean)),
+    );
+    if (recipients.length === 0) return;
     const rows: Array<[string, string]> = [
       ["Équipement", args.equipmentName],
       ["Objet", args.label],
@@ -641,7 +659,7 @@ export const sendEquipmentReservationToManagers = internalAction({
     });
 
     await sendToEachRecipient(
-      args.recipients,
+      recipients,
       `Réservation d'équipement · ${args.equipmentName} (${args.requesterName})`,
       html,
     );

@@ -37,12 +37,11 @@ function assetImageArgs(asset: { photo?: unknown; photoUrl?: string }) {
 
 const PAGE_KEY = "mesoutils:reservations";
 
-// Destinataire unique des notifications « nouvelle demande de réservation
-// véhicule » : seul ce compte est prévenu de chaque demande.
-const VEHICLE_REQUEST_NOTIFY_EMAILS = [
-  "f.henry@eco-solidaire.fr",
-  "y.prata@eco-solidaire.fr",
-];
+// Comptes prévenus dans l'app à chaque « nouvelle demande de réservation
+// véhicule ». Doit rester aligné sur `VEHICLE_REQUEST_MANAGER_EMAILS`, qui
+// gouverne l'email : un responsable retiré d'une liste et pas de l'autre
+// continuerait d'être sollicité par un seul des deux canaux.
+const VEHICLE_REQUEST_NOTIFY_EMAILS = ["f.henry@eco-solidaire.fr"];
 
 const PERMANENT_DELETE_EMAIL = "lahmerselim@gmail.com";
 
@@ -454,7 +453,7 @@ export const bookRoom = mutation({
       });
     }
 
-    // Email aux responsables des réservations de salle (a.still & y.prata).
+    // Email aux responsables des réservations de salle.
     // Décalé pour ne pas dépasser la limite Resend (2 req/s) avec l'email au demandeur.
     await ctx.scheduler.runAfter(1200, internal.mesoutilsEmails.sendRoomReservationToManagers, {
       requesterName,
@@ -1049,9 +1048,22 @@ export const requestRoomFeedbackForPastReservations = internalMutation({
 
 // ─── Remarques (retours) pour les encadrants ─────────────────────────────────
 
+/**
+ * Retours de réservation d'un véhicule.
+ *
+ * `scope` sépare deux populations qui n'ont pas le même usage :
+ *  - « incidents » (défaut) : les retours qui SIGNALENT quelque chose. C'est la
+ *    liste de travail — ce qui appelle une réparation ou un suivi.
+ *  - « returns » : les retours « tout est ok ». Ils ne demandent rien, mais ils
+ *    prouvent que le véhicule a bien été rendu et portent le kilométrage, la
+ *    propreté, le plein. Sans eux, on ne voit que ce qui va mal.
+ */
 export const listVehicleRemarks = query({
-  args: { vehicleId: v.optional(v.id("vehicles")) },
-  handler: async (ctx, { vehicleId }) => {
+  args: {
+    vehicleId: v.optional(v.id("vehicles")),
+    scope: v.optional(v.union(v.literal("incidents"), v.literal("returns"))),
+  },
+  handler: async (ctx, { vehicleId, scope }) => {
     await requireCrmPermission(ctx, "mesoutils:gotravaux", "read");
     const raw = vehicleId
       ? await ctx.db
@@ -1060,11 +1072,15 @@ export const listVehicleRemarks = query({
           .order("desc")
           .collect()
       : await ctx.db.query("vehicleReservations").order("desc").take(300);
-    // Un retour « tout est ok » n'est pas une remarque : seuls les retours ayant
-    // déclaré un incident remontent ici. Les retours antérieurs au drapeau
-    // `feedbackIncident` sont jugés sur la présence d'un texte d'incident.
+    // Un retour « tout est ok » n'est pas une remarque. Les retours antérieurs
+    // au drapeau `feedbackIncident` sont jugés sur la présence d'un texte
+    // d'incident.
+    const hasIncident = (r: Doc<"vehicleReservations">) =>
+      r.feedbackIncident ?? Boolean(r.feedbackIssues?.trim());
     const reservations = raw.filter(
-      (r) => r.feedbackSubmittedAt && (r.feedbackIncident ?? Boolean(r.feedbackIssues?.trim())),
+      (r) =>
+        r.feedbackSubmittedAt &&
+        (scope === "returns" ? !hasIncident(r) : hasIncident(r)),
     );
     const [vehicles, mileageSource] = await Promise.all([
       ctx.db.query("vehicles").collect(),

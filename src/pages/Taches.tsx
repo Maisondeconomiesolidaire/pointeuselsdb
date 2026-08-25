@@ -1,6 +1,6 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery } from "convex/react";
-import { ArrowLeft, CheckCircle2, Clock, ListTodo, Pencil, Plus, Trash2 } from "lucide-react";
+import { ArrowLeft, CheckCircle2, Clock, ListTodo, Paperclip, Pencil, Plus, Trash2 } from "lucide-react";
 import { api } from "../../convex/_generated/api";
 import type { Id } from "../../convex/_generated/dataModel";
 import { PageHeader } from "../components/ui/PageHeader";
@@ -10,7 +10,7 @@ import { Modal } from "../components/ui/Modal";
 import { EmptyState } from "../components/ui/EmptyState";
 import { FullSpinner } from "../components/ui/Spinner";
 import { SearchInput, matchesSearch } from "../components/ui/SearchInput";
-import { PhotoPicker, type PickedPhoto } from "../components/ui/PhotoPicker";
+import { AttachmentPicker, type PickedAttachment } from "../components/ui/AttachmentPicker";
 import { formatDate, formatEuros, parseDateInput, toDateInputValue } from "../lib/format";
 import { cn } from "../lib/cn";
 
@@ -97,6 +97,15 @@ export function Taches() {
                       </p>
                     </div>
                     <div className="flex items-center gap-2">
+                      {t.documentIds.length > 0 ? (
+                        <span
+                          className="inline-flex items-center gap-1 text-xs text-[var(--muted-foreground)]"
+                          title={`${t.documentIds.length} pièce${t.documentIds.length > 1 ? "s" : ""} jointe${t.documentIds.length > 1 ? "s" : ""}`}
+                        >
+                          <Paperclip className="h-3.5 w-3.5" />
+                          {t.documentIds.length}
+                        </span>
+                      ) : null}
                       <span
                         className={cn(
                           "inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs font-semibold",
@@ -202,9 +211,29 @@ function TaskForm({ task, onClose }: { task?: TaskItem; onClose: () => void }) {
     task?.travel?.roundTrips ? String(task.travel.roundTrips) : "",
   );
   const [notes, setNotes] = useState(task?.notes ?? "");
-  const [photos, setPhotos] = useState<PickedPhoto[]>([]);
+  const [attachments, setAttachments] = useState<PickedAttachment[]>([]);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // Pièces jointes déjà rattachées : chargées une fois, puis pilotées par le
+  // formulaire (ajout ou retrait) jusqu'à l'enregistrement.
+  const existingDocuments = useQuery(
+    api.pointeuse.documentsByIds,
+    task ? { documentIds: task.documentIds } : "skip",
+  );
+  const loadedDocumentsRef = useRef(false);
+  useEffect(() => {
+    if (loadedDocumentsRef.current || !existingDocuments) return;
+    loadedDocumentsRef.current = true;
+    setAttachments(
+      existingDocuments.map((document) => ({
+        id: document._id,
+        name: document.name,
+        mimeType: document.mimeType,
+        url: document.url,
+      })),
+    );
+  }, [existingDocuments]);
 
   // Un salarié déjà affecté reste modifiable même s'il a été désactivé depuis.
   const assignedIds = useMemo(
@@ -296,6 +325,7 @@ function TaskForm({ task, onClose }: { task?: TaskItem; onClose: () => void }) {
           }),
           roundTrips: travelDone && trips > 0 ? trips : 0,
           notes: notes || "",
+          documentIds: attachments.map((attachment) => attachment.id),
         });
       } else {
         await createTask({
@@ -307,7 +337,7 @@ function TaskForm({ task, onClose }: { task?: TaskItem; onClose: () => void }) {
           })),
           roundTrips: travelDone && trips > 0 ? trips : undefined,
           notes: notes || undefined,
-          documentIds: photos.map((photo) => photo.id),
+          documentIds: attachments.map((attachment) => attachment.id),
         });
       }
       onClose();
@@ -525,15 +555,13 @@ function TaskForm({ task, onClose }: { task?: TaskItem; onClose: () => void }) {
             )}
           </div>
 
-          {editing ? null : (
-            <Field label="Images du chantier" hint="Optionnel">
-              <PhotoPicker
-                projectId={projectId ? (projectId as Id<"ptProjects">) : null}
-                photos={photos}
-                onChange={setPhotos}
-              />
-            </Field>
-          )}
+          <Field label="Pièces jointes" hint="Photos, PDF… Optionnel">
+            <AttachmentPicker
+              projectId={projectId ? (projectId as Id<"ptProjects">) : null}
+              attachments={attachments}
+              onChange={setAttachments}
+            />
+          </Field>
 
           <Field label="Remarques" hint="Optionnel">
             <Textarea value={notes} onChange={(e) => setNotes(e.target.value)} />

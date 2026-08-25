@@ -7,6 +7,8 @@ import {
 } from "./_generated/server";
 import { requireCrmPermission } from "./lib";
 import type { Id } from "./_generated/dataModel";
+import { scheduleStripeSync } from "./stripeCatalog";
+import { createInShopSaleRequest } from "./requests";
 
 const saleItemValidator = v.object({
   articleId: v.id("articles"),
@@ -53,7 +55,10 @@ async function recordVente(
   });
 
   await Promise.all(
-    args.items.map((item) => ctx.db.patch(item.articleId, { status: "vendu" })),
+    args.items.map(async (item) => {
+      await ctx.db.patch(item.articleId, { status: "vendu" });
+      await scheduleStripeSync(ctx, item.articleId);
+    }),
   );
 
   return { venteId, receiptNumber, total, change };
@@ -71,10 +76,49 @@ export const createVente = mutation({
       v.literal("virement"),
     ),
     amountTendered: v.optional(v.number()),
+    /**
+     * Client de la vente. Renseigné, la vente crée en plus une demande
+     * boutique achevée : c'est ce qui fait apparaître l'achat dans
+     * l'historique du client et dans le CRM.
+     */
+    customer: v.optional(
+      v.object({
+        firstName: v.string(),
+        lastName: v.string(),
+        email: v.string(),
+        phone: v.optional(v.string()),
+      }),
+    ),
+    stripePaymentIntentId: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
     await requireCrmPermission(ctx, "caisse", "checkout");
-    return await recordVente(ctx, args);
+    const { customer, stripePaymentIntentId, ...sale } = args;
+    const result = await recordVente(ctx, sale);
+
+    let requestId = null;
+    if (customer) {
+      requestId = await createInShopSaleRequest(ctx, {
+        customer: {
+          firstName: customer.firstName,
+          lastName: customer.lastName,
+          email: customer.email,
+          phone: customer.phone ?? "",
+        },
+        articles: args.items.map((item) => ({
+          articleId: item.articleId,
+          articleTitle: item.title,
+        })),
+        total: result.total,
+        // Le CRM ne connaît que deux moyens de paiement sur une demande ;
+        // tout ce qui n'est pas de l'espèce est traité comme une carte.
+        paymentMethod: args.paymentMethod === "especes" ? "especes" : "cb",
+        receiptNumber: result.receiptNumber,
+        stripePaymentIntentId,
+      });
+    }
+
+    return { ...result, requestId };
   },
 });
 
@@ -119,17 +163,10 @@ export const getArticleByReference = query({
   args: { reference: v.string() },
   handler: async (ctx, { reference }) => {
     await requireCrmPermission(ctx, "caisse", "read");
-    // Try internalReference index first, then gdrReference
-    let found = await ctx.db
+    const found = await ctx.db
       .query("articles")
       .withIndex("by_internalReference", (q) => q.eq("internalReference", reference))
       .first();
-    if (!found) {
-      found = await ctx.db
-        .query("articles")
-        .withIndex("by_gdrReference", (q) => q.eq("gdrReference", reference))
-        .first();
-    }
     if (!found) return null;
     const imageUrls = await Promise.all(
       found.images.map((id: Id<"_storage">) => ctx.storage.getUrl(id)),
@@ -159,7 +196,6 @@ export const searchArticlesForSale = query({
         const haystack = [
           article.title,
           article.internalReference,
-          article.gdrReference,
           article.category,
           article.subcategory,
         ]
@@ -169,7 +205,7 @@ export const searchArticlesForSale = query({
         const textMatch = haystack.some((value) => value.includes(normalized));
         const digitMatch =
           digitSearch.length > 0 &&
-          [article.internalReference, article.gdrReference]
+          [article.internalReference]
             .filter((value): value is string => Boolean(value))
             .map((value) => value.replace(/\D/g, ""))
             .some((value) => value.includes(digitSearch));
@@ -187,7 +223,7 @@ export const searchArticlesForSale = query({
           _id: article._id,
           title: article.title,
           price: article.price,
-          reference: article.internalReference ?? article.gdrReference ?? "",
+          reference: article.internalReference ?? "",
           imageUrls: imageUrls.filter(Boolean) as string[],
         };
       }),
@@ -195,11 +231,19 @@ export const searchArticlesForSale = query({
   },
 });
 
+const saleCustomerValidator = v.object({
+  firstName: v.string(),
+  lastName: v.string(),
+  email: v.string(),
+  phone: v.optional(v.string()),
+});
+
 export const createStripeCheckoutDraft = internalMutation({
   args: {
     items: v.array(saleItemValidator),
     discountAmount: v.optional(v.number()),
     createdBy: v.string(),
+    customer: v.optional(saleCustomerValidator),
   },
   handler: async (ctx, args) => {
     const subtotal = args.items.reduce((sum, item) => sum + item.price, 0);
@@ -209,6 +253,7 @@ export const createStripeCheckoutDraft = internalMutation({
       discountAmount: args.discountAmount,
       total,
       createdBy: args.createdBy,
+      customer: args.customer,
       status: "pending",
       createdAt: Date.now(),
     });
@@ -243,6 +288,7 @@ export const finalizeStripeCheckoutDraft = internalMutation({
         venteId: draft.venteId,
         receiptNumber: draft.receiptNumber,
         total: draft.total,
+        requestId: draft.requestId ?? null,
       };
     }
 
@@ -256,15 +302,35 @@ export const finalizeStripeCheckoutDraft = internalMutation({
       paymentMethod: "cb",
     });
 
+    const requestId = draft.customer
+      ? await createInShopSaleRequest(ctx as MutationCtx, {
+          customer: {
+            firstName: draft.customer.firstName,
+            lastName: draft.customer.lastName,
+            email: draft.customer.email,
+            phone: draft.customer.phone ?? "",
+          },
+          articles: draft.items.map((item) => ({
+            articleId: item.articleId,
+            articleTitle: item.title,
+          })),
+          total: result.total,
+          paymentMethod: "cb",
+          receiptNumber: result.receiptNumber,
+          stripePaymentIntentId,
+        })
+      : null;
+
     await ctx.db.patch(draftId, {
       stripeSessionId,
       stripePaymentIntentId,
       status: "completed",
       venteId: result.venteId,
       receiptNumber: result.receiptNumber,
+      ...(requestId ? { requestId } : {}),
       completedAt: Date.now(),
     });
 
-    return result;
+    return { ...result, requestId };
   },
 });

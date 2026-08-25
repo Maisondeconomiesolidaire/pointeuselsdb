@@ -342,6 +342,16 @@ const requestPayment = v.object({
   stripeSessionId: v.optional(v.string()),
   stripePaymentIntentId: v.optional(v.string()),
   paidAt: v.optional(v.number()),
+  /** Remboursement Stripe déclenché depuis le CRM (montant en euros). */
+  stripeRefundId: v.optional(v.string()),
+  refundedAmount: v.optional(v.number()),
+  refundedAt: v.optional(v.number()),
+  refundedBy: v.optional(v.string()),
+  /** Bon de réduction utilisé au paiement (code, remise, montant déduit). */
+  discountCode: v.optional(v.string()),
+  discountPercent: v.optional(v.number()),
+  discountAmount: v.optional(v.number()),
+  subtotal: v.optional(v.number()),
 });
 
 const veloDetails = v.object({
@@ -398,9 +408,16 @@ export default defineSchema(
     weightKg: v.optional(v.number()),
     // Emplacement physique de l'article en boutique / réserve.
     location: v.optional(v.string()),
+    // Caisse physique (bac étiqueté d'un QR code) qui contient l'article.
+    // Remplace progressivement le champ texte `location`.
+    caisseId: v.optional(v.id("caisses")),
     originalPrice: v.optional(v.number()),
     internalReference: v.optional(v.string()),
-    gdrReference: v.optional(v.string()),
+    /**
+     * Recyclerie qui détient physiquement l'article : le client vient le
+     * retirer sur ce site, et la boutique en ligne permet de filtrer dessus.
+     */
+    site: v.optional(v.union(v.literal("60"), v.literal("76"))),
     category: v.string(),
     subcategory: v.optional(v.string()),
     condition: v.string(),
@@ -415,18 +432,78 @@ export default defineSchema(
       // Ancien statut conservé pour compatibilité avec les articles déjà créés.
       v.literal("lot"),
     ),
+    /**
+     * Article créé par simple photo depuis le stock boutique : il attend encore
+     * la génération d'annonce IA et le détourage (cf. « Nouveau run »).
+     */
+    draft: v.optional(v.boolean()),
     isLot: v.optional(v.boolean()),
     bundledArticleIds: v.optional(v.array(v.id("articles"))),
     bundleKey: v.optional(v.string()),
     bundleReason: v.optional(v.string()),
     // Article mis en avant "Produit du jour" (un seul à la fois).
     productOfDay: v.optional(v.boolean()),
+    /**
+     * Miroir de l'article dans le catalogue Stripe.
+     *
+     * Recycapp est la source de vérité : la synchronisation ne va que dans ce
+     * sens. Le montant et l'état déjà poussés sont mémorisés pour que la
+     * réconciliation nocturne n'appelle Stripe que lorsque quelque chose a
+     * réellement changé.
+     */
+    stripeProductId: v.optional(v.string()),
+    stripePriceId: v.optional(v.string()),
+    /** Montant du prix Stripe en vigueur, en centimes. */
+    stripePriceAmount: v.optional(v.number()),
+    stripeActive: v.optional(v.boolean()),
+    stripeSyncedAt: v.optional(v.number()),
     createdAt: v.number(),
   })
     .index("by_status", ["status"])
     .index("by_internalReference", ["internalReference"])
-    .index("by_gdrReference", ["gdrReference"])
-    .index("by_productOfDay", ["productOfDay"]),
+    .index("by_productOfDay", ["productOfDay"])
+    .index("by_caisse", ["caisseId"])
+    .index("by_site", ["site"])
+    .index("by_stripeProduct", ["stripeProductId"]),
+
+  /**
+   * Pool de QR codes d'articles imprimés À L'AVANCE.
+   *
+   * L'équipe imprime une planche d'étiquettes vierges, les colle sur les objets
+   * au fil de la collecte, puis crée les fiches en scannant le code déjà posé.
+   * Cela évite l'aller-retour « créer la fiche → imprimer → retrouver l'objet →
+   * coller ». La référence a le même format que `articles.internalReference`
+   * (6 chiffres), donc un code scanné se comporte exactement comme aujourd'hui.
+   */
+  articleQrCodes: defineTable({
+    reference: v.string(),
+    /** Renseigné dès que le code est attribué à un article. */
+    articleId: v.optional(v.id("articles")),
+    assignedAt: v.optional(v.number()),
+    /** Horodatage de la planche d'impression, pour regrouper un lot de codes. */
+    batchAt: v.number(),
+    createdAt: v.number(),
+  })
+    .index("by_reference", ["reference"])
+    .index("by_article", ["articleId"])
+    .index("by_batch", ["batchAt"]),
+
+  /**
+   * Caisses de rangement de la recyclerie : chaque caisse porte un QR code
+   * collé dessus. On scanne la caisse à l'ajout d'un article pour l'y ranger,
+   * et on la rescanne pour voir tout ce qu'elle contient.
+   */
+  caisses: defineTable({
+    /** Code imprimé sur le QR code, ex. « CA-0007 ». Unique. */
+    code: v.string(),
+    /** Nom libre donné par l'équipe, ex. « Vaisselle réserve ». */
+    label: v.optional(v.string()),
+    /** Zone / lieu où se trouve la caisse, ex. « Réserve », « Boutique ». */
+    zone: v.optional(v.string()),
+    notes: v.optional(v.string()),
+    archived: v.optional(v.boolean()),
+    createdAt: v.number(),
+  }).index("by_code", ["code"]),
 
   /** Articles sauvegardés (wishlist) par les clients connectés. */
   wishlists: defineTable({
@@ -942,6 +1019,16 @@ export default defineSchema(
     discountAmount: v.optional(v.number()),
     total: v.number(),
     createdBy: v.string(),
+    /** Client de la vente : la demande boutique est créée à l'encaissement. */
+    customer: v.optional(
+      v.object({
+        firstName: v.string(),
+        lastName: v.string(),
+        email: v.string(),
+        phone: v.optional(v.string()),
+      }),
+    ),
+    requestId: v.optional(v.id("requests")),
     stripeSessionId: v.optional(v.string()),
     stripePaymentIntentId: v.optional(v.string()),
     status: v.union(v.literal("pending"), v.literal("completed")),
@@ -951,11 +1038,75 @@ export default defineSchema(
     completedAt: v.optional(v.number()),
   }).index("by_stripeSessionId", ["stripeSessionId"]),
 
+  /**
+   * Lien de paiement généré depuis le CRM : permet de faire régler en ligne
+   * une demande boutique existante, ou un ou plusieurs articles choisis, sans
+   * passer par le panier. Le `token` est l'identifiant public du lien.
+   */
+  paymentLinks: defineTable({
+    token: v.string(),
+    articleIds: v.array(v.id("articles")),
+    /** Demande boutique réglée par ce lien (absent pour un lien ad hoc). */
+    requestId: v.optional(v.id("requests")),
+    /** Coordonnées connues à la création, pour préremplir la page de paiement. */
+    customer: v.optional(customer),
+    /** Montant figé à la création du lien (euros). */
+    amount: v.number(),
+    status: v.union(
+      v.literal("pending"),
+      v.literal("paid"),
+      v.literal("cancelled"),
+    ),
+    stripePaymentIntentId: v.optional(v.string()),
+    /** Horodatage du dernier envoi par email. */
+    sentAt: v.optional(v.number()),
+    createdAt: v.number(),
+    createdBy: v.optional(v.string()),
+    paidAt: v.optional(v.number()),
+  })
+    .index("by_token", ["token"])
+    .index("by_request", ["requestId"]),
+
+  /**
+   * Bons de réduction de la boutique en ligne.
+   *
+   * Un bon est généré depuis le CRM, imprimé ou dicté au client, et vaut un
+   * pourcentage sur la totalité d'un panier. Le code est long et tiré au sort
+   * (« RECY » + 16 chiffres) : il ne se devine pas, et un bon consommé ne peut
+   * plus resservir — `status` bascule sur « used » au moment de l'encaissement.
+   */
+  discountCodes: defineTable({
+    code: v.string(),
+    /** Remise en pourcentage du panier, de 5 à 80. */
+    percent: v.number(),
+    status: v.union(
+      v.literal("active"),
+      v.literal("used"),
+      v.literal("cancelled"),
+    ),
+    label: v.optional(v.string()),
+    createdAt: v.number(),
+    createdBy: v.optional(v.string()),
+    usedAt: v.optional(v.number()),
+    usedByRequestId: v.optional(v.id("requests")),
+    /** Montant réellement remisé, en euros, au moment de l'encaissement. */
+    discountAmount: v.optional(v.number()),
+    cancelledAt: v.optional(v.number()),
+  })
+    .index("by_code", ["code"])
+    .index("by_status", ["status"]),
+
   publicStripeCheckoutDrafts: defineTable({
     articleIds: v.array(v.id("articles")),
     customer: customer,
     comment: v.optional(v.string()),
+    /** Montant réellement dû, remise déduite. */
     total: v.number(),
+    /** Bon de réduction appliqué au panier, s'il y en a un. */
+    discountCodeId: v.optional(v.id("discountCodes")),
+    discountPercent: v.optional(v.number()),
+    discountAmount: v.optional(v.number()),
+    subtotal: v.optional(v.number()),
     stripeSessionId: v.optional(v.string()),
     stripePaymentIntentId: v.optional(v.string()),
     status: v.union(v.literal("pending"), v.literal("completed")),
@@ -1679,6 +1830,126 @@ export default defineSchema(
     .index("by_clerkId_itemId", ["clerkId", "itemId"])
     .index("by_itemId", ["itemId"]),
 
+  /* ─── Klyd — boîte Gmail Vinted (OAuth Google + emails analysés) ─────────
+   *
+   * Vinted n'expose pas d'API publique : la seule source fiable sur ce qui est
+   * vendu, expédié ou payé reste la boîte mail du compte. On lit donc, en
+   * lecture seule (scope `gmail.readonly`), les emails Vinted du compte Gmail
+   * connecté, et on en extrait les informations exploitables dans Klyd.
+   */
+
+  /** Compte Gmail connecté via OAuth Google (un par boîte, réutilisable). */
+  klydeGmailAccounts: defineTable({
+    /** Adresse Gmail réellement connectée (renvoyée par Google, pas saisie). */
+    email: v.string(),
+    /** Clerk de la personne qui a autorisé l'accès (traçabilité). */
+    connectedByClerkId: v.string(),
+    connectedByName: v.optional(v.string()),
+    /**
+     * Jeton de rafraîchissement Google : c'est LUI qui donne l'accès durable.
+     * Google ne le renvoie qu'au premier consentement (`prompt=consent` force
+     * son renvoi) — on ne l'écrase donc jamais par une valeur vide.
+     */
+    refreshToken: v.string(),
+    accessToken: v.optional(v.string()),
+    accessTokenExpiresAt: v.optional(v.number()),
+    /** Requête Gmail appliquée à la synchronisation (surchargeable). */
+    query: v.optional(v.string()),
+    active: v.boolean(),
+    /** Date (ms) du message le plus récent déjà importé : borne du sync incrémental. */
+    lastMessageDate: v.optional(v.number()),
+    lastSyncAt: v.optional(v.number()),
+    lastSyncError: v.optional(v.string()),
+    importedCount: v.optional(v.number()),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  })
+    .index("by_email", ["email"])
+    .index("by_active", ["active"]),
+
+  /**
+   * État anti-CSRF de la redirection OAuth. Créé avant l'envoi chez Google,
+   * consommé (et supprimé) au retour : un `code` sans état connu est rejeté.
+   */
+  klydeGmailOAuthStates: defineTable({
+    state: v.string(),
+    clerkId: v.string(),
+    clerkName: v.optional(v.string()),
+    returnUrl: v.string(),
+    createdAt: v.number(),
+  }).index("by_state", ["state"]),
+
+  /** Email Vinted importé et analysé (une ligne par message Gmail). */
+  klydeVintedEmails: defineTable({
+    accountId: v.id("klydeGmailAccounts"),
+    /** Identifiant Gmail du message : clé d'idempotence de l'import. */
+    gmailId: v.string(),
+    threadId: v.optional(v.string()),
+    /** Date d'envoi (ms), telle que donnée par Gmail (`internalDate`). */
+    sentAt: v.number(),
+    subject: v.string(),
+    from: v.string(),
+    snippet: v.optional(v.string()),
+    /** Corps en texte brut (HTML aplati si l'email n'a pas de partie texte). */
+    bodyText: v.optional(v.string()),
+    /** Nature du message, déduite du sujet et du corps. */
+    kind: v.union(
+      v.literal("vente"),
+      v.literal("bordereau"),
+      v.literal("expedition"),
+      v.literal("paiement"),
+      v.literal("offre"),
+      v.literal("message"),
+      v.literal("autre"),
+    ),
+    /** Informations extraites (regex, complétées si besoin par l'IA). */
+    itemTitle: v.optional(v.string()),
+    amount: v.optional(v.number()),
+    buyer: v.optional(v.string()),
+    orderRef: v.optional(v.string()),
+    trackingNumber: v.optional(v.string()),
+    carrier: v.optional(v.string()),
+    /** Lien « imprimer le bordereau » trouvé dans l'email. */
+    labelUrl: v.optional(v.string()),
+    /** Lien vers la conversation Vinted avec l'acheteur. */
+    conversationUrl: v.optional(v.string()),
+    /** Lien vers l'annonce Vinted concernée. */
+    itemUrl: v.optional(v.string()),
+    /** Enseigne d'où vient l'email, déduite de la boîte scrutée. */
+    outlet: v.optional(v.union(v.literal("klyd"), v.literal("mobifrip"))),
+    /** Adresse qui a transféré la notification Vinted (le cas courant). */
+    forwardedBy: v.optional(v.string()),
+    /** Date de réception du transfert, quand elle diffère de la date d'origine. */
+    forwardedAt: v.optional(v.number()),
+    /** Pièces jointes rapatriées dans le stockage Convex (bordereaux PDF). */
+    attachments: v.optional(
+      v.array(
+        v.object({
+          storageId: v.id("_storage"),
+          filename: v.string(),
+          mimeType: v.string(),
+          size: v.optional(v.number()),
+        }),
+      ),
+    ),
+    /** `true` si l'extraction a été complétée par l'IA. */
+    aiParsed: v.optional(v.boolean()),
+    /** Article Klyd rattaché (rapprochement automatique ou manuel). */
+    matchedItemId: v.optional(v.id("klydeItems")),
+    matchConfidence: v.optional(v.number()),
+    /** Email traité par l'équipe (masqué de la file d'attente). */
+    handled: v.optional(v.boolean()),
+    handledAt: v.optional(v.number()),
+    handledByClerkId: v.optional(v.string()),
+    createdAt: v.number(),
+  })
+    .index("by_gmailId", ["gmailId"])
+    .index("by_sentAt", ["sentAt"])
+    .index("by_kind", ["kind"])
+    .index("by_handled", ["handled"])
+    .index("by_account", ["accountId"])
+    .index("by_matchedItem", ["matchedItemId"]),
+
   /* ─── App « Bennes & Pro » : dépôts de déchets par les entreprises ──────── */
 
   /** Entreprises qui déposent des déchets sur le site. */
@@ -1753,9 +2024,32 @@ export default defineSchema(
     key: v.string(),
     /** Prix du DIB en centimes d'euro par kg (défaut : 34). */
     dibPriceCentsPerKg: v.optional(v.number()),
+    /** Code PIN de l'onglet « Profils » (défaut : 0205). */
+    profilesPin: v.optional(v.string()),
     updatedAt: v.optional(v.number()),
     updatedBy: v.optional(v.string()),
   }).index("by_key", ["key"]),
+
+  /**
+   * Profils d'un compte Bennes & Pro partagé par plusieurs personnes.
+   *
+   * Le compte est unique mais l'équipe est multiple : à l'ouverture, chacun
+   * choisit son profil (à la Netflix), et c'est ce nom-là qui est inscrit sur
+   * les dépôts qu'il enregistre. Sans ça, tous les dépôts porteraient la même
+   * adresse email et on ne saurait jamais qui était sur le terrain.
+   */
+  bpProfiles: defineTable({
+    /** Compte partagé auquel appartient le profil (email Clerk, en minuscules). */
+    ownerEmail: v.string(),
+    name: v.string(),
+    /** Rôle ou mention libre affichée sous le nom (« Chauffeur », « Quai »…). */
+    role: v.optional(v.string()),
+    /** Teinte de la vignette, pour distinguer les profils d'un coup d'œil. */
+    color: v.optional(v.string()),
+    archived: v.optional(v.boolean()),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  }).index("by_owner", ["ownerEmail"]),
 
   /** Véhicules appartenant à une entreprise (bennes, camions...). */
   bpVehicles: defineTable({
@@ -1789,10 +2083,18 @@ export default defineSchema(
     /** Facturation Stripe des matières payantes, au poids. */
     billing: v.optional(bpBilling),
     createdBy: v.optional(v.string()),
+    /**
+     * Profil de la personne qui a saisi le dépôt derrière un compte partagé.
+     * Le nom est recopié : un profil renommé ou supprimé plus tard ne doit pas
+     * effacer la trace de qui a fait le dépôt ce jour-là.
+     */
+    createdByProfileId: v.optional(v.id("bpProfiles")),
+    createdByProfile: v.optional(v.string()),
     createdAt: v.number(),
   })
     .index("by_company", ["companyId"])
-    .index("by_number", ["depotNumber"]),
+    .index("by_number", ["depotNumber"])
+    .index("by_profile", ["createdByProfileId"]),
 
   // ───────────────────────── App « Pointeuse LSDB » ─────────────────────────
   // Suivi des salariés et des chantiers : clients, projets, pointages,

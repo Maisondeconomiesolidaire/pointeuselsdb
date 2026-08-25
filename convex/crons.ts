@@ -45,4 +45,21 @@ crons.daily(
   internal.klyde.sendVintedAlerts,
 );
 
+// Filet de sécurité du catalogue Stripe : chaque écriture sur un article
+// planifie déjà sa synchronisation, mais un statut peut changer par un chemin
+// qui ne la déclenche pas. On repousse ici, chaque nuit, ce qui a dérivé.
+crons.daily(
+  "synchronisation catalogue stripe",
+  { hourUTC: 3, minuteUTC: 20 },
+  internal.stripeCatalog.reconcile,
+);
+
+// Boîte Gmail Vinted de Klyd : import des ventes, bordereaux et virements.
+// Toutes les heures — Vinted n'a pas d'API, l'email est la seule source.
+crons.hourly(
+  "import emails vinted klyd",
+  { minuteUTC: 40 },
+  internal.klydeGmail.syncAll,
+);
+
 export default crons;

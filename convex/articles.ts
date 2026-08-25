@@ -1,7 +1,14 @@
 import { mutation, query } from "./_generated/server";
 import type { QueryCtx } from "./_generated/server";
 import { v } from "convex/values";
+import { internal } from "./_generated/api";
+import { scheduleStripeSync } from "./stripeCatalog";
 import { requireCrmPermission } from "./lib";
+import {
+  claimQrCode,
+  normalizeReference,
+  releaseQrCodes,
+} from "./articleQrCodes";
 import { Doc, Id } from "./_generated/dataModel";
 
 async function withImageUrls(
@@ -25,6 +32,26 @@ async function withCoverImageUrl(
 ) {
   const cover = article.images[0] ? await ctx.storage.getUrl(article.images[0]) : null;
   return { ...article, imageUrls: cover ? [cover] : [] };
+}
+
+/**
+ * Codes des caisses, indexés par identifiant.
+ *
+ * Le code (« CA-12 ») est annoncé au client : c'est le bac où l'objet
+ * l'attend en boutique. La table des caisses est petite — on la lit une fois
+ * pour toute une liste plutôt qu'une caisse par article.
+ */
+async function caisseCodesById(ctx: QueryCtx) {
+  const caisses = await ctx.db.query("caisses").collect();
+  return new Map(caisses.map((caisse) => [String(caisse._id), caisse.code]));
+}
+
+/** Code de la caisse d'un article, ou `undefined` s'il n'est pas rangé. */
+function caisseCodeOf(
+  article: Doc<"articles">,
+  codes: Map<string, string>,
+): string | undefined {
+  return article.caisseId ? codes.get(String(article.caisseId)) : undefined;
 }
 
 async function withBundleDetails(ctx: QueryCtx, article: Doc<"articles">) {
@@ -178,19 +205,17 @@ function areLotCompatible(a: Doc<"articles">, b: Doc<"articles">) {
   return keywordOverlap(deriveKeywords(a), deriveKeywords(b)).length >= 2;
 }
 
+/** Valeurs par défaut d'un article créé à partir d'une simple photo. */
+const DRAFT_CATEGORY = "Maison et Jardin";
+const DRAFT_CONDITION = "Bon état";
+
 function normalizeDigits(value: string) {
   return value.replace(/\D/g, "");
 }
 
-function assertArticleReferences(args: {
-  internalReference: string;
-  gdrReference?: string;
-}) {
+function assertArticleReferences(args: { internalReference: string }) {
   if (!/^\d{6}$/.test(args.internalReference)) {
     throw new Error("La référence interne doit contenir exactement 6 chiffres.");
-  }
-  if (args.gdrReference && !/^\d{15}$/.test(args.gdrReference)) {
-    throw new Error("La référence GDR doit contenir exactement 15 chiffres.");
   }
 }
 
@@ -223,10 +248,16 @@ async function generateInternalReference(ctx: {
 
 function matchesArticleFilters(
   article: Doc<"articles">,
-  filters: { searchText?: string; categories?: string[] },
+  filters: { searchText?: string; categories?: string[]; site?: "60" | "76" },
 ) {
   const selectedCategories = filters.categories?.filter(Boolean) ?? [];
   if (selectedCategories.length > 0 && !selectedCategories.includes(article.category)) {
+    return false;
+  }
+
+  // Filtre recyclerie : un article sans site renseigné (stock antérieur au
+  // champ) n'apparaît que dans « Toutes les recycleries ».
+  if (filters.site && article.site !== filters.site) {
     return false;
   }
 
@@ -240,7 +271,6 @@ function matchesArticleFilters(
     article.category,
     article.subcategory,
     article.internalReference,
-    article.gdrReference,
     ...(article.keywords ?? []),
     article.themeKey,
   ]
@@ -250,7 +280,7 @@ function matchesArticleFilters(
   const textMatch = haystack.some((value) => value.includes(normalizedSearch));
   const digitMatch =
     digitSearch.length > 0 &&
-    [article.internalReference, article.gdrReference]
+    [article.internalReference]
       .filter((value): value is string => Boolean(value))
       .map(normalizeDigits)
       .some((value) => value.includes(digitSearch));
@@ -265,6 +295,7 @@ function matchesArticleFilters(
 export const listPublic = query({
   args: {
     categories: v.optional(v.array(v.string())),
+    site: v.optional(v.union(v.literal("60"), v.literal("76"))),
   },
   handler: async (ctx, args) => {
     const articles = await ctx.db
@@ -278,7 +309,13 @@ export const listPublic = query({
         a.status !== "lot" &&
         matchesArticleFilters(a, args),
     );
-    return Promise.all(visible.map((a) => withCoverImageUrl(ctx, a)));
+    const codes = await caisseCodesById(ctx);
+    return Promise.all(
+      visible.map(async (a) => ({
+        ...(await withCoverImageUrl(ctx, a)),
+        caisseCode: caisseCodeOf(a, codes),
+      })),
+    );
   },
 });
 
@@ -290,8 +327,10 @@ export const getPublic = query({
     if (!article) return null;
     const enriched = await withBundleDetails(ctx, article);
     const similarArticles = await similarArticlesFor(ctx, article);
+    const caisse = article.caisseId ? await ctx.db.get(article.caisseId) : null;
     return {
       ...enriched,
+      caisseCode: caisse?.code,
       similarArticles,
     };
   },
@@ -416,6 +455,69 @@ export const listAll = query({
   },
 });
 
+/** Fiche article complète pour le CRM (page /crm/articles/:id). */
+export const getForCrm = query({
+  args: { id: v.id("articles") },
+  handler: async (ctx, { id }) => {
+    await requireCrmPermission(ctx, "articles", "read");
+    const article = await ctx.db.get(id);
+    if (!article) return null;
+    return withImageUrls(ctx, article);
+  },
+});
+
+/**
+ * Le panier d'une demande boutique, vu du CRM.
+ *
+ * Une seule requête pour toute la commande : chaque article arrive avec sa
+ * photo, son prix, sa référence (celle du QR code) et surtout son emplacement
+ * physique — caisse et recyclerie. Depuis une demande, l'équipe n'a autrement
+ * aucune idée de l'endroit où sont rangés les objets à préparer.
+ *
+ * Contrairement à `getManyPublic`, les articles vendus sont conservés : dans
+ * une commande payée, ils le sont tous.
+ */
+export const cartForCrm = query({
+  args: { ids: v.array(v.id("articles")) },
+  handler: async (ctx, { ids }) => {
+    await requireCrmPermission(ctx, "demandes", "read");
+    const items = [];
+    for (const id of ids.slice(0, 40)) {
+      const article = await ctx.db.get(id);
+      if (!article) {
+        items.push({ id, article: null });
+        continue;
+      }
+      const caisse = article.caisseId ? await ctx.db.get(article.caisseId) : null;
+      const enriched = await withImageUrls(ctx, article);
+      items.push({
+        id,
+        article: {
+          _id: enriched._id,
+          title: enriched.title,
+          price: enriched.price,
+          originalPrice: enriched.originalPrice ?? null,
+          category: enriched.category,
+          weightKg: enriched.weightKg ?? null,
+          status: enriched.status,
+          imageUrls: enriched.imageUrls,
+          internalReference: enriched.internalReference ?? null,
+          site: enriched.site ?? null,
+          location: enriched.location ?? null,
+          caisse: caisse
+            ? {
+                code: caisse.code,
+                label: caisse.label ?? null,
+                zone: caisse.zone ?? null,
+              }
+            : null,
+        },
+      });
+    }
+    return items;
+  },
+});
+
 export const listForLotAnalysis = query({
   args: {},
   handler: async (ctx) => {
@@ -424,6 +526,8 @@ export const listForLotAnalysis = query({
     const candidates = articles.filter(
       (article) =>
         !article.isLot &&
+        // Un brouillon n'a ni titre ni description exploitables par l'IA.
+        !article.draft &&
         !article.bundleKey &&
         article.status !== "vendu" &&
         article.status !== "reserve",
@@ -457,8 +561,15 @@ export const create = mutation({
     price: v.number(),
     weightKg: v.number(),
     location: v.optional(v.string()),
+    caisseId: v.optional(v.id("caisses")),
+    /**
+     * Référence d'un QR code déjà imprimé et collé sur l'objet. Fournie, elle
+     * devient la référence interne de l'article au lieu d'en tirer une neuve.
+     */
+    qrReference: v.optional(v.string()),
     originalPrice: v.optional(v.number()),
-    gdrReference: v.optional(v.string()),
+    /** Recyclerie qui détient l'article (site de retrait pour le client). */
+    site: v.optional(v.union(v.literal("60"), v.literal("76"))),
     category: v.string(),
     subcategory: v.optional(v.string()),
     condition: v.string(),
@@ -471,19 +582,16 @@ export const create = mutation({
   },
   handler: async (ctx, args) => {
     await requireCrmPermission(ctx, "articles", "create");
-    const internalReference = await generateInternalReference(ctx);
-    assertArticleReferences({
-      internalReference,
-      gdrReference: args.gdrReference,
-    });
-    const { desiredStatus, ...articleArgs } = args;
+    const scanned = args.qrReference ? normalizeReference(args.qrReference) : "";
+    const internalReference = scanned || (await generateInternalReference(ctx));
+    assertArticleReferences({ internalReference });
+    const { desiredStatus, qrReference: _qrReference, ...articleArgs } = args;
     const shouldKeepForLot = desiredStatus === "attente" || desiredStatus === "lot";
     const articleId = await ctx.db.insert("articles", {
       ...articleArgs,
       weightKg: normalizeWeightKg(args.weightKg),
       location: args.location?.trim() || undefined,
       internalReference,
-      gdrReference: args.gdrReference || undefined,
       keywords: args.keywords?.length ? uniqueKeywords(args.keywords) : undefined,
       themeKey: args.themeKey
         ? normalizeKeyword(args.themeKey).replace(/\s+/g, "-")
@@ -491,7 +599,115 @@ export const create = mutation({
       status: shouldKeepForLot ? "attente" : "disponible",
       createdAt: Date.now(),
     });
+    if (scanned) await claimQrCode(ctx, scanned, articleId);
+    await scheduleStripeSync(ctx, articleId);
     return articleId;
+  },
+});
+
+/**
+ * Ajout rapide au stock boutique : on ne fournit QUE des photos, une par
+ * article. Chaque photo crée un article « brouillon » avec sa référence interne
+ * (donc son QR code) ; l'annonce et le détourage sont produits plus tard par un
+ * run IA groupé (cf. `applyAiListing`).
+ */
+export const createDraftsFromPhotos = mutation({
+  args: {
+    storageIds: v.array(v.id("_storage")),
+    /** Caisse dans laquelle ranger tous les brouillons créés. */
+    caisseId: v.optional(v.id("caisses")),
+    /**
+     * QR codes déjà collés sur les objets, alignés sur `storageIds`. Une chaîne
+     * vide laisse tirer une référence neuve pour cette photo.
+     */
+    qrReferences: v.optional(v.array(v.string())),
+  },
+  handler: async (ctx, { storageIds, caisseId, qrReferences }) => {
+    await requireCrmPermission(ctx, "articles", "create");
+    if (storageIds.length === 0) {
+      throw new Error("Ajoutez au moins une photo.");
+    }
+    if (caisseId && !(await ctx.db.get(caisseId))) {
+      throw new Error("Caisse introuvable.");
+    }
+
+    const created: Array<{ id: Id<"articles">; internalReference: string }> = [];
+    // Les références sont tirées une par une : `generateInternalReference` relit
+    // la table, donc les brouillons déjà insérés sont bien pris en compte.
+    for (const [index, storageId] of storageIds.entries()) {
+      const scanned = normalizeReference(qrReferences?.[index] ?? "");
+      const internalReference = scanned || (await generateInternalReference(ctx));
+      const id = await ctx.db.insert("articles", {
+        title: `Article ${internalReference}`,
+        description: "",
+        price: 0,
+        category: DRAFT_CATEGORY,
+        condition: DRAFT_CONDITION,
+        caisseId,
+        internalReference,
+        images: [storageId],
+        status: "attente",
+        draft: true,
+        createdAt: Date.now(),
+      });
+      if (scanned) await claimQrCode(ctx, scanned, id);
+      await scheduleStripeSync(ctx, id);
+      created.push({ id, internalReference });
+    }
+    return created;
+  },
+});
+
+/**
+ * Applique à un article le résultat d'un run IA (annonce générée, éventuelles
+ * images détourées) et le sort de l'état brouillon.
+ */
+export const applyAiListing = mutation({
+  args: {
+    id: v.id("articles"),
+    title: v.string(),
+    description: v.string(),
+    price: v.number(),
+    originalPrice: v.optional(v.number()),
+    weightKg: v.optional(v.number()),
+    category: v.string(),
+    subcategory: v.optional(v.string()),
+    condition: v.string(),
+    keywords: v.optional(v.array(v.string())),
+    themeKey: v.optional(v.string()),
+    images: v.optional(v.array(v.id("_storage"))),
+    status: v.optional(
+      v.union(v.literal("disponible"), v.literal("attente"), v.literal("lot")),
+    ),
+  },
+  handler: async (ctx, { id, images, status, ...rest }) => {
+    await requireCrmPermission(ctx, "articles", "update");
+    const article = await ctx.db.get(id);
+    if (!article) throw new Error("Article introuvable.");
+    if (!rest.title.trim()) throw new Error("Le titre est requis.");
+    if (rest.price < 0) throw new Error("Prix invalide.");
+
+    await ctx.db.patch(id, {
+      title: rest.title.trim(),
+      description: rest.description,
+      price: rest.price,
+      originalPrice: rest.originalPrice,
+      weightKg:
+        rest.weightKg !== undefined
+          ? normalizeWeightKg(rest.weightKg)
+          : article.weightKg,
+      category: rest.category,
+      subcategory: rest.subcategory || undefined,
+      condition: rest.condition,
+      keywords: rest.keywords?.length ? uniqueKeywords(rest.keywords) : undefined,
+      themeKey: rest.themeKey
+        ? normalizeKeyword(rest.themeKey).replace(/\s+/g, "-")
+        : undefined,
+      ...(images ? { images } : {}),
+      ...(status ? { status } : {}),
+      draft: undefined,
+    });
+    await scheduleStripeSync(ctx, id);
   },
 });
 
@@ -574,6 +790,11 @@ export const publishLot = mutation({
       ),
     );
 
+    await scheduleStripeSync(ctx, lotId);
+    for (const article of articles) {
+      await scheduleStripeSync(ctx, article._id);
+    }
+
     return lotId;
   },
 });
@@ -592,6 +813,7 @@ export const patchStatus = mutation({
   handler: async (ctx, { id, status }) => {
     await requireCrmPermission(ctx, "articles", "update");
     await ctx.db.patch(id, { status });
+    await scheduleStripeSync(ctx, id);
   },
 });
 
@@ -603,9 +825,10 @@ export const update = mutation({
     price: v.number(),
     weightKg: v.number(),
     location: v.optional(v.string()),
+    caisseId: v.optional(v.id("caisses")),
     originalPrice: v.optional(v.number()),
     internalReference: v.string(),
-    gdrReference: v.optional(v.string()),
+    site: v.optional(v.union(v.literal("60"), v.literal("76"))),
     category: v.string(),
     subcategory: v.optional(v.string()),
     condition: v.string(),
@@ -627,26 +850,16 @@ export const update = mutation({
       ...rest,
       weightKg: normalizeWeightKg(rest.weightKg),
       location: rest.location?.trim() || undefined,
-      gdrReference: rest.gdrReference || undefined,
+      // Explicite : le formulaire pilote la caisse, y compris pour la vider
+      // (`undefined` retire le champ, alors qu'un argument absent le garderait).
+      caisseId: rest.caisseId ?? undefined,
+      site: rest.site ?? undefined,
       keywords: rest.keywords?.length ? uniqueKeywords(rest.keywords) : undefined,
       themeKey: rest.themeKey
         ? normalizeKeyword(rest.themeKey).replace(/\s+/g, "-")
         : undefined,
     });
-  },
-});
-
-/** CRM : renseigne uniquement la référence externe (GDR) d'un article.
- *  Raccourci utilisé depuis le suivi d'une demande boutique. */
-export const setGdrReference = mutation({
-  args: { id: v.id("articles"), gdrReference: v.string() },
-  handler: async (ctx, { id, gdrReference }) => {
-    await requireCrmPermission(ctx, "articles", "update");
-    const trimmed = gdrReference.trim();
-    if (trimmed && !/^\d{15}$/.test(trimmed)) {
-      throw new Error("La référence GDR doit contenir exactement 15 chiffres.");
-    }
-    await ctx.db.patch(id, { gdrReference: trimmed || undefined });
+    await scheduleStripeSync(ctx, id);
   },
 });
 
@@ -654,6 +867,18 @@ export const remove = mutation({
   args: { id: v.id("articles") },
   handler: async (ctx, { id }) => {
     await requireCrmPermission(ctx, "articles", "delete");
+    // L'étiquette reste collée quelque part : on rend le code au pool plutôt
+    // que de le perdre avec l'article.
+    await releaseQrCodes(ctx, id);
+    // Les identifiants Stripe disparaissent avec le document : on planifie
+    // l'archivage du produit AVANT de supprimer l'article.
+    const article = await ctx.db.get(id);
+    if (article?.stripeProductId) {
+      await ctx.scheduler.runAfter(0, internal.stripeCatalog.archiveProduct, {
+        stripeProductId: article.stripeProductId,
+        stripePriceId: article.stripePriceId,
+      });
+    }
     await ctx.db.delete(id);
   },
 });

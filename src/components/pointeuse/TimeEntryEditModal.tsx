@@ -7,6 +7,7 @@ import { EmptyState } from "../ui/EmptyState";
 import { Modal } from "../ui/Modal";
 import { FullSpinner } from "../ui/Spinner";
 import { AppSelect, DatePicker, Field, Input, Textarea } from "../ui/Field";
+import { AttachmentPicker, type PickedAttachment } from "../ui/AttachmentPicker";
 import { ClipboardList } from "lucide-react";
 import { cn } from "../../lib/cn";
 import { formatDate, formatEuros, parseDateInput, toDateInputValue } from "../../lib/format";
@@ -65,6 +66,16 @@ function EditForm({ entry, onClose }: { entry: Entry; onClose: () => void }) {
     entry.travel?.roundTrips ? String(entry.travel.roundTrips) : "",
   );
   const [notes, setNotes] = useState(entry.notes ?? "");
+  // Les pièces déjà rattachées arrivent avec le pointage : le formulaire les
+  // reprend telles quelles, puis pilote les ajouts et les retraits.
+  const [attachments, setAttachments] = useState<PickedAttachment[]>(() =>
+    entry.documents.map((document) => ({
+      id: document._id,
+      name: document.name,
+      mimeType: document.mimeType,
+      url: document.url,
+    })),
+  );
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -135,6 +146,7 @@ function EditForm({ entry, onClose }: { entry: Entry; onClose: () => void }) {
         lines: computedLines.map((l) => ({ employeeId: l.employee._id, hours: l.hours })),
         roundTrips: trips,
         notes: notes || "",
+        documentIds: attachments.map((attachment) => attachment.id),
       });
       onClose();
     } catch (e) {
@@ -267,6 +279,14 @@ function EditForm({ entry, onClose }: { entry: Entry; onClose: () => void }) {
             />
           </Field>
         ) : null}
+
+        <Field label="Pièces jointes" hint="Photos, PDF… Optionnel">
+          <AttachmentPicker
+            projectId={projectId ? (projectId as Id<"ptProjects">) : null}
+            attachments={attachments}
+            onChange={setAttachments}
+          />
+        </Field>
 
         <Field label="Remarques" hint="Optionnel">
           <Textarea value={notes} onChange={(e) => setNotes(e.target.value)} />
