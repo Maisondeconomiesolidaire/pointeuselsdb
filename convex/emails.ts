@@ -473,6 +473,24 @@ const AEROGOMMAGE_STAFF_EMAILS = [
   "e.carette@eco-solidaire.fr",
 ];
 
+/**
+ * Dépôts en recyclerie : chaque site a sa propre équipe d'accueil, seule à
+ * pouvoir tenir le planning des créneaux du lundi. Un dépôt part donc aux
+ * destinataires de SA recyclerie, pas à la liste générale.
+ */
+const DEPOT_STAFF_EMAILS: Record<"60" | "76", string[]> = {
+  "60": [
+    "e.carette@eco-solidaire.fr",
+    "a.dargent@eco-solidaire.fr",
+    "accueil.recyclerie@eco-solidaire.fr",
+  ],
+  "76": [
+    "o.dalencourt@eco-solidaire.fr",
+    "v.horcholle@eco-solidaire.fr",
+    "accueil.recyclerie@eco-solidaire.fr",
+  ],
+};
+
 /** Lien de paiement envoyé au client depuis le CRM. */
 export const sendPaymentLink = internalAction({
   args: {
@@ -512,8 +530,10 @@ export const sendNewRequestToStaff = internalAction({
     reference: v.string(),
     customerName: v.string(),
     article: articleArg,
+    /** Recyclerie concernée — renseignée pour les dépôts, qui sont routés par site. */
+    site: v.optional(v.union(v.literal("60"), v.literal("76"))),
   },
-  handler: async (_ctx, { type, reference, customerName, article }) => {
+  handler: async (_ctx, { type, reference, customerName, article, site }) => {
     const label = typeLabel(type);
     const html = shell({
       preheader: `Nouvelle demande ${label} de ${customerName} (#${reference}).`,
@@ -526,7 +546,11 @@ export const sendNewRequestToStaff = internalAction({
       `,
     });
     const recipients =
-      type === "aerogommage" ? AEROGOMMAGE_STAFF_EMAILS : NEW_REQUEST_STAFF_EMAILS;
+      type === "depot" && site
+        ? DEPOT_STAFF_EMAILS[site]
+        : type === "aerogommage"
+          ? AEROGOMMAGE_STAFF_EMAILS
+          : NEW_REQUEST_STAFF_EMAILS;
     await resendSend(recipients, `Nouvelle demande · ${label} #${reference}`, html);
   },
 });
@@ -805,5 +829,55 @@ export const sendInvoicePendingDigest = internalAction({
       `${count} facture${count > 1 ? "s" : ""} en attente de règlement`,
       html,
     );
+  },
+});
+
+// ─── Avis Google ─────────────────────────────────────────────────────────────
+
+/**
+ * Fiche Google à noter, par site de traitement. Une demande sans site part sur
+ * la Recyclerie 60 : c'est le site principal, et un lien vaut mieux qu'aucun.
+ */
+const GOOGLE_REVIEW_LINKS: Record<string, { url: string; label: string }> = {
+  // Liens « /review » de la fiche Google : ils ouvrent directement le
+  // formulaire de notation, là où un lien de partage impose un détour par la
+  // fiche puis un second clic.
+  "60": { url: "https://g.page/r/Ca7-zpJ4l8p2EBM/review", label: "Recyclerie du Pays de Bray (60)" },
+  "76": { url: "https://g.page/r/Cc5Sx_tZfUvBEBM/review", label: "Recyclerie de Gournay en Bray (76)" },
+};
+
+/** Invitation à laisser un avis Google, envoyée une fois la demande gagnée. */
+export const sendReviewInvite = internalAction({
+  args: {
+    email: v.string(),
+    name: v.string(),
+    reference: v.string(),
+    type: v.string(),
+    site: v.optional(v.string()),
+  },
+  handler: async (_ctx, { email, name, reference, type, site }) => {
+    const label = typeLabel(type);
+    const review = GOOGLE_REVIEW_LINKS[site ?? "60"] ?? GOOGLE_REVIEW_LINKS["60"];
+    const stars = "★★★★★";
+    const html = shell({
+      preheader: `Votre demande ${label} #${reference} est terminée : donnez-nous votre avis en une minute.`,
+      heading: "Merci de votre confiance 🙌",
+      intro: `Bonjour ${esc(name)},<br/><br/>Votre demande <strong>${esc(label)}</strong> (référence <strong>#${esc(reference)}</strong>) est terminée. Nous espérons que tout s'est bien passé !`,
+      contentHtml: `
+        <div style="margin:0 0 22px;padding:18px;background:linear-gradient(135deg,#fff7ef,#ffe9d6);border:1px solid #ffe0c4;border-radius:14px;text-align:center;">
+          <p style="margin:0 0 6px;font-family:Helvetica,Arial,sans-serif;font-size:26px;letter-spacing:3px;color:#f59e0b;">${stars}</p>
+          <p style="margin:0;font-family:Helvetica,Arial,sans-serif;font-size:15px;line-height:23px;color:#3f3f46;">
+            Votre avis nous aide à faire connaître la ${esc(review.label)} et à nous améliorer. Cela prend moins d'une minute.
+          </p>
+        </div>
+        <div style="margin:0 0 22px;">${button(review.url, "Laisser un avis Google")}</div>
+        <p style="margin:0 0 22px;font-family:Helvetica,Arial,sans-serif;font-size:13px;line-height:21px;color:#71717a;">
+          Un souci à nous signaler plutôt qu'un avis ? Répondez-nous depuis votre messagerie : nous reprenons contact avec vous.
+        </p>
+        <p style="margin:0 0 10px;font-family:Helvetica,Arial,sans-serif;font-size:13px;color:#71717a;">Accès rapides :</p>
+        ${quickLinks()}
+      `,
+    });
+    await resendSend(email, `Votre avis compte · ${label} #${reference}`, html);
   },
 });

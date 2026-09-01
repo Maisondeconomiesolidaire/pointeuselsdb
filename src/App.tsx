@@ -46,6 +46,7 @@ import { Fournisseurs } from "./pages/Fournisseurs";
 import { Depenses } from "./pages/Depenses";
 import { Factures } from "./pages/Factures";
 import { UpdateAvailableBanner } from "./components/UpdateAvailableBanner";
+import { ProfileSync } from "./components/ProfileSync";
 
 const NAV = [
   { to: "/", label: "Tableau de bord", icon: LayoutDashboard, end: true, pageKey: "pointeuse:dashboard" },
@@ -404,6 +405,9 @@ function AccessGate() {
 export default function App() {
   return (
     <div className="min-h-full">
+      {/* Hors de toute garde d'authentification : l'origine de l'inscription
+          se constitue pendant la visite déconnectée. */}
+      <ProfileSync app="pointeuse" />
       <UpdateAvailableBanner appName="Pointeuse LSDB" />
       <SignedIn>
         <AccessGate />

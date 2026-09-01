@@ -166,13 +166,15 @@ async function createNewRequestNotification(
 
   // Email à l'équipe recyclerie — décalé pour rester sous la limite Resend
   // (2 req/s) avec l'email client. E. Carette est ajouté uniquement pour
-  // les demandes d'aérogommage par l'action d'envoi.
+  // les demandes d'aérogommage par l'action d'envoi, et un dépôt part à
+  // l'équipe de SA recyclerie : d'où le site transmis ici.
   if (request) {
     await ctx.scheduler.runAfter(1200, internal.emails.sendNewRequestToStaff, {
       type: request.type,
       reference: request.reference ?? String(request._id).slice(-6),
       customerName: customerFullName(request.customer),
       article: await emailArticlePreview(ctx, request),
+      site: request.depot?.site ?? request.site,
     });
   }
 }
@@ -1324,6 +1326,9 @@ export const finalizePaymentLink = internalMutation({
         completedSteps: progress.completedSteps,
         updatedAt: now,
       });
+      if (progress.outcome === "gagnee" && request.outcome !== "gagnee") {
+        await scheduleReviewInvite(ctx, request);
+      }
     } else {
       // Lien généré depuis un article : on crée la demande boutique payée.
       const linkCustomer = normalizeCustomer(
@@ -1688,6 +1693,28 @@ export const get = query({
   },
 });
 
+/**
+ * Invitation à noter la Recyclerie sur Google, à l'issue d'une demande gagnée.
+ *
+ * Envoyée une seule fois par demande (`reviewInviteSentAt`) : une demande
+ * rouverte puis re-soldée ne relance pas le client. Sans email client, il n'y
+ * a rien à envoyer. Le lien dépend du site de traitement, la Recyclerie 60
+ * servant de défaut quand il n'est pas renseigné.
+ */
+async function scheduleReviewInvite(ctx: MutationCtx, request: Doc<"requests">) {
+  if (request.reviewInviteSentAt) return;
+  const email = request.customer.email?.trim();
+  if (!email) return;
+  await ctx.db.patch(request._id, { reviewInviteSentAt: Date.now() });
+  await ctx.scheduler.runAfter(0, internal.emails.sendReviewInvite, {
+    email,
+    name: customerFullName(request.customer) || "à vous",
+    reference: request.reference ?? String(request._id).slice(-6),
+    type: request.type,
+    site: request.site ?? "60",
+  });
+}
+
 export const setOutcome = mutation({
   args: {
     id: v.id("requests"),
@@ -1710,6 +1737,9 @@ export const setOutcome = mutation({
         outcome === "perdue" ? (lostReasonDetails ?? undefined) : undefined,
       updatedAt: Date.now(),
     });
+    if (outcome === "gagnee" && request.outcome !== "gagnee") {
+      await scheduleReviewInvite(ctx, request);
+    }
     if (request.type === "article") {
       const articleStatus =
         outcome === "gagnee"
@@ -1722,6 +1752,35 @@ export const setOutcome = mutation({
         await scheduleStripeSync(ctx, articleId);
       }
     }
+  },
+});
+
+
+/**
+ * Vente encaissée au terminal, en boutique : les deux étapes du parcours
+ * boutique sont franchies d'un coup.
+ *
+ * Le paiement est fait ET l'article part avec le client — il n'y a pas de
+ * retrait à attendre, contrairement à une commande payée en ligne. La demande
+ * est donc close et gagnée dans la foulée.
+ */
+export const completeTerminalSale = internalMutation({
+  args: { requestId: v.id("requests"), by: v.optional(v.string()) },
+  handler: async (ctx, { requestId, by }) => {
+    const request = await ctx.db.get(requestId);
+    if (!request) throw new Error("Demande introuvable.");
+    const steps = request.processSteps ?? [];
+    const now = Date.now();
+    await ctx.db.patch(requestId, {
+      completedSteps: steps.length,
+      outcome: "gagnee",
+      processLog: steps.map((_, index) => ({
+        step: index,
+        by: by?.trim() || "Caisse (terminal)",
+        at: now,
+      })),
+      updatedAt: now,
+    });
   },
 });
 
@@ -1939,6 +1998,7 @@ export const patchManagement = mutation({
     id: v.id("requests"),
     site: v.optional(v.union(v.literal("60"), v.literal("76"))),
     assignedTo: v.optional(v.union(v.id("teamMembers"), v.null())),
+    assignedWorkerId: v.optional(v.union(v.id("polyvalentWorkers"), v.null())),
     estimatedHours: v.optional(v.union(v.number(), v.null())),
     actualHours: v.optional(v.union(v.number(), v.null())),
     quoteAmount: v.optional(v.union(v.number(), v.null())),
@@ -1967,6 +2027,9 @@ export const patchManagement = mutation({
         request.assignedTo,
         args.assignedTo ?? undefined,
       );
+    }
+    if (args.assignedWorkerId !== undefined) {
+      setPatchIfChanged(patch, changed, "assignedWorkerId", request.assignedWorkerId, args.assignedWorkerId ?? undefined);
     }
     if (args.assignedVehicle !== undefined) {
       if (args.assignedVehicle) {
@@ -2157,6 +2220,9 @@ export const advanceProcess = mutation({
       outcome: done ? "gagnee" : "open",
       updatedAt: Date.now(),
     });
+    if (done && r.outcome !== "gagnee") {
+      await scheduleReviewInvite(ctx, r);
+    }
     if (done && r.type === "article") {
       for (const articleId of requestArticleIds(r)) {
         await ctx.db.patch(articleId, { status: "vendu" });
@@ -2676,4 +2742,3 @@ export const sendPendingInvoicesDigest = internalAction({
     return { count: requests.length };
   },
 });
-
