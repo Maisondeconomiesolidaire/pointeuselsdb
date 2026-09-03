@@ -29,6 +29,7 @@ const PAGE_DONS = "batire:dons";
 const profileFields = {
   company: v.optional(v.string()),
   siret: v.optional(v.string()),
+  apeCode: v.optional(v.string()),
   profiles: v.optional(v.array(v.string())),
   firstName: v.optional(v.string()),
   lastName: v.optional(v.string()),
@@ -65,6 +66,7 @@ export const getMyDonorProfile = query({
     return {
       company: profile?.company ?? "",
       siret: profile?.siret ?? "",
+      apeCode: profile?.apeCode ?? "",
       profiles: profile?.profiles ?? [],
       firstName: profile?.firstName || (givenName ? titleCaseName(givenName) : ""),
       lastName: profile?.lastName || (familyName ? titleCaseName(familyName) : ""),
@@ -86,6 +88,7 @@ export const saveMyDonorProfile = mutation({
     const patch = {
       company: trimmed(args.company),
       siret: trimmed(args.siret),
+      apeCode: trimmed(args.apeCode)?.toUpperCase(),
       profiles: args.profiles?.filter((value) => value.trim()) ?? [],
       firstName: args.firstName ? titleCaseName(args.firstName) : undefined,
       lastName: args.lastName ? titleCaseName(args.lastName) : undefined,
@@ -136,6 +139,10 @@ export const submitDonation = mutation({
     unit: v.optional(btUnit),
     availableFrom: v.optional(v.number()),
     photos: v.array(v.id("_storage")),
+    handover: v.optional(v.union(v.literal("depot"), v.literal("recuperer"))),
+    pickupAddress: v.optional(v.string()),
+    pickupPostalCode: v.optional(v.string()),
+    pickupCity: v.optional(v.string()),
     /** Coordonnées confirmées à l'envoi ; elles mettent la fiche à jour. */
     donor: v.object({
       company: v.optional(v.string()),
@@ -159,6 +166,12 @@ export const submitDonation = mutation({
     if (!firstName || !lastName) throw new ConvexError("Indiquez votre prénom et votre nom.");
     const email = (identity.email ?? "").toLowerCase();
     if (!email) throw new ConvexError("Votre compte n'a pas d'adresse email.");
+    // Un enlèvement sans adresse n'est pas planifiable : autant le refuser à la
+    // saisie plutôt qu'au téléphone.
+    const pickupAddress = trimmed(args.pickupAddress);
+    if (args.handover === "recuperer" && !pickupAddress) {
+      throw new ConvexError("Indiquez l'adresse où récupérer le lot.");
+    }
 
     const now = Date.now();
     const donor = {
@@ -195,9 +208,22 @@ export const submitDonation = mutation({
       unit: args.unit,
       availableFrom: args.availableFrom,
       photos: args.photos,
+      handover: args.handover ?? "depot",
+      pickupAddress,
+      pickupPostalCode: trimmed(args.pickupPostalCode),
+      pickupCity: trimmed(args.pickupCity),
       status: "nouveau",
       createdAt: now,
       updatedAt: now,
+    });
+
+    const donation = await ctx.db.get(donationId);
+    await ctx.scheduler.runAfter(0, internal.batireEmails.sendDonationReceived, {
+      to: donor.email,
+      firstName: donor.firstName,
+      reference: donation?.reference ?? "",
+      title,
+      pickup: args.handover === "recuperer",
     });
     return donationId;
   },
@@ -313,7 +339,28 @@ export const decideDonation = mutation({
       reference: donation.reference,
       title: donation.title,
       accepted: args.status === "accepte",
+      pickup: donation.handover === "recuperer",
       message,
+    });
+  },
+});
+
+/**
+ * Rattache la fiche matériau créée depuis un don.
+ *
+ * Le don garde ainsi la trace de ce qu'il est devenu, et l'équipe voit d'un
+ * coup d'œil ce qui reste à mettre en stock.
+ */
+export const markDonationConverted = mutation({
+  args: { id: v.id("btDonations"), materialId: v.id("btMaterials") },
+  handler: async (ctx, args) => {
+    await requireCrmPermission(ctx, PAGE_DONS, "update");
+    const donation = await ctx.db.get(args.id);
+    if (!donation) throw new ConvexError("Don introuvable.");
+    await ctx.db.patch(args.id, {
+      materialId: args.materialId,
+      convertedAt: Date.now(),
+      updatedAt: Date.now(),
     });
   },
 });

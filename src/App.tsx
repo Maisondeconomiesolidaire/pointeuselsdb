@@ -7,13 +7,7 @@ import {
   Routes,
   useLocation,
 } from "react-router-dom";
-import {
-  SignedIn,
-  SignedOut,
-  SignInButton,
-  useClerk,
-  useUser,
-} from "@clerk/clerk-react";
+import { SignedIn, SignedOut, useClerk, useUser } from "@clerk/clerk-react";
 import { useConvexAuth, useQuery } from "convex/react";
 import {
   Building2,
@@ -47,6 +41,7 @@ import { Depenses } from "./pages/Depenses";
 import { Factures } from "./pages/Factures";
 import { UpdateAvailableBanner } from "./components/UpdateAvailableBanner";
 import { ProfileSync } from "./components/ProfileSync";
+import { AuthSwitch } from "./components/ui/auth-switch";
 
 const NAV = [
   { to: "/", label: "Tableau de bord", icon: LayoutDashboard, end: true, pageKey: "pointeuse:dashboard" },
@@ -343,32 +338,9 @@ function AppLayout({ access }: { access: Access }) {
   );
 }
 
+/** Portail d'authentification commun à l'écosystème (voir ui/auth-switch). */
 function SignInScreen() {
-  return (
-    <div className="flex h-full flex-col items-center justify-center gap-6 p-8 text-center">
-      <div className="flex h-20 w-20 items-center justify-center rounded-2xl bg-white shadow-sm ring-1 ring-black/5">
-        <img
-          src="/logo-lsdb.png"
-          alt="LSDB"
-          className="h-16 w-16 object-contain"
-        />
-      </div>
-      <div>
-        <h1 className="text-2xl font-semibold text-[var(--foreground)]">
-          Pointeuse LSDB
-        </h1>
-        <p className="mt-2 max-w-sm text-sm text-[var(--muted-foreground)]">
-          Suivi des salariés et des chantiers. Connectez-vous avec votre compte
-          Mes Outils.
-        </p>
-      </div>
-      <SignInButton mode="modal">
-        <button className="inline-flex h-11 items-center rounded-lg bg-brand-500 px-6 text-sm font-medium text-white hover:bg-brand-600">
-          Se connecter
-        </button>
-      </SignInButton>
-    </div>
-  );
+  return <AuthSwitch appName="Pointeuse LSDB" logoSrc="/logo-lsdb.png" />;
 }
 
 function AccessGate() {

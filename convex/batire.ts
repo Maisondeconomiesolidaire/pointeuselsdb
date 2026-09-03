@@ -11,6 +11,7 @@
 import { ConvexError, v } from "convex/values";
 import { action, internalMutation, internalQuery, mutation, query } from "./_generated/server";
 import type { Doc, Id } from "./_generated/dataModel";
+import type { MutationCtx } from "./_generated/server";
 import { api, internal } from "./_generated/api";
 import {
   accessAllows,
@@ -98,6 +99,7 @@ const materialFields = {
   unit: btUnit,
   quantity: v.number(),
   price: v.number(),
+  originalPrice: v.optional(v.number()),
   packaging: v.optional(v.string()),
   lengthCm: v.optional(v.number()),
   widthCm: v.optional(v.number()),
@@ -154,10 +156,27 @@ function stars(value: unknown) {
   return Math.min(5, parsed);
 }
 
+/**
+ * Une fiche en ligne sans prix ne s'affiche nulle part : la boutique l'écarte,
+ * sa page publique répond « introuvable » et l'équipe la croit publiée. On le
+ * dit au moment de l'enregistrement plutôt que de laisser la fiche disparaître.
+ */
+function assertPublishable(published: boolean, price: number) {
+  if (published && price <= 0) {
+    throw new ConvexError(
+      "Indiquez un prix avant de mettre la fiche en ligne : sans prix, elle reste invisible en boutique.",
+    );
+  }
+}
+
 /** Champs normalisés : un prix ou un stock négatif n'a pas de sens. */
 function normalizeMaterial(args: Record<string, unknown>) {
   const price = Math.max(0, Number(args.price) || 0);
   const quantity = Math.max(0, Number(args.quantity) || 0);
+  // Un prix barré inférieur ou égal au prix de vente n'affiche aucune remise :
+  // on le laisse tomber plutôt que de barrer un chiffre plus bas.
+  const rawOriginal = Math.max(0, Number(args.originalPrice) || 0);
+  const originalPrice = rawOriginal > price ? rawOriginal : undefined;
   // Les matières viennent d'une liste à choix multiple ; `material` reste
   // alimenté en texte, car la recherche, la boutique et l'import Excel le
   // lisent encore. Deux champs, une seule saisie.
@@ -168,6 +187,7 @@ function normalizeMaterial(args: Record<string, unknown>) {
   return {
     ...args,
     price,
+    originalPrice,
     quantity,
     materials: list,
     material,
@@ -179,6 +199,141 @@ function normalizeMaterial(args: Record<string, unknown>) {
   };
 }
 
+/**
+ * Prévient les clients dont la recherche vise ce matériau.
+ *
+ * Trois garde-fous : le lot doit être visible en boutique, l'envoi n'a lieu
+ * qu'une fois par lot (`searchAlertsSentAt`), et la recherche doit être
+ * ANTÉRIEURE au matériau — le stock déjà en ligne au moment de la demande,
+ * le client vient de le parcourir, il n'a pas à recevoir un email pour lui.
+ */
+async function notifySearchAlerts(ctx: MutationCtx, materialId: Id<"btMaterials">) {
+  const material = await ctx.db.get(materialId);
+  if (!material) return;
+  // La règle est celle de `listPublicMaterials`, prix compris : une fiche sans
+  // prix n'existe pas en boutique, et prévenir quelqu'un d'un lot qu'il ne peut
+  // pas ouvrir lui envoie un lien mort. Tant qu'elle n'est pas visible, on ne
+  // pose pas non plus le drapeau — l'alerte partira quand elle le deviendra.
+  if (material.published !== true) return;
+  if (material.status !== "disponible" || material.price <= 0) return;
+  if (material.searchAlertsSentAt) return;
+
+  const now = Date.now();
+  const alerts = await ctx.db
+    .query("btSearchAlerts")
+    .withIndex("by_category", (q) => q.eq("category", material.category))
+    .collect();
+  const matching = alerts.filter(
+    (alert) =>
+      (!alert.until || alert.until >= now) &&
+      alert.createdAt < material.createdAt &&
+      (!alert.family || alert.family === material.family) &&
+      (!alert.subcategory || alert.subcategory === material.subcategory),
+  );
+
+  // Le drapeau se pose même sans destinataire : republier un lot ne doit pas
+  // relancer la recherche des clients inscrits entre-temps.
+  await ctx.db.patch(materialId, { searchAlertsSentAt: now });
+  if (matching.length === 0) return;
+
+  for (const alert of matching) {
+    await ctx.db.patch(alert._id, {
+      lastNotifiedAt: now,
+      matchCount: (alert.matchCount ?? 0) + 1,
+    });
+  }
+
+  await ctx.scheduler.runAfter(0, internal.batireEmails.sendSearchAlert, {
+    materialId: String(materialId),
+    title: material.title,
+    category: material.category,
+    family: material.family,
+    subcategory: material.subcategory,
+    price: material.price,
+    unit: material.unit,
+    // Un lot annoncé pour plus tard mérite le même email, à condition d'y lire
+    // la date : le client saura quand venir plutôt que de se déplacer pour rien.
+    availableFrom: material.availableFrom,
+    imageStorageId: material.photos[0] ? String(material.photos[0]) : undefined,
+    recipients: matching.map((alert) => ({
+      email: alert.email,
+      name: alert.name,
+      wanted: [alert.category, alert.family, alert.subcategory].filter(Boolean).join(" › "),
+    })),
+  });
+}
+
+/* ─── « Je recherche » : les demandes des clients ──────────────────────────── */
+
+export const createSearchAlert = mutation({
+  args: {
+    category: v.string(),
+    family: v.optional(v.string()),
+    subcategory: v.optional(v.string()),
+    until: v.optional(v.number()),
+  },
+  handler: async (ctx, args) => {
+    const identity = await requireUser(ctx);
+    const category = args.category.trim();
+    if (!category) throw new ConvexError("Choisissez au moins une catégorie.");
+    const email = (identity.email ?? "").toLowerCase();
+    if (!email) throw new ConvexError("Votre compte n'a pas d'adresse email.");
+
+    // Deux fois la même branche ne sert à rien : on prolonge la recherche
+    // existante plutôt que d'envoyer deux emails pour un seul lot.
+    const existing = await ctx.db
+      .query("btSearchAlerts")
+      .withIndex("by_clerkId", (q) => q.eq("clerkId", identity.subject))
+      .collect();
+    const twin = existing.find(
+      (alert) =>
+        alert.category === category &&
+        (alert.family ?? "") === (args.family?.trim() ?? "") &&
+        (alert.subcategory ?? "") === (args.subcategory?.trim() ?? ""),
+    );
+    if (twin) {
+      await ctx.db.patch(twin._id, { until: args.until });
+      return twin._id;
+    }
+
+    return await ctx.db.insert("btSearchAlerts", {
+      clerkId: identity.subject,
+      email,
+      name: formatUserName(identity),
+      category,
+      family: args.family?.trim() || undefined,
+      subcategory: args.subcategory?.trim() || undefined,
+      until: args.until,
+      createdAt: Date.now(),
+    });
+  },
+});
+
+/** Les recherches du client connecté, la plus récente en tête. */
+export const mySearchAlerts = query({
+  args: {},
+  handler: async (ctx) => {
+    const identity = await ctx.auth.getUserIdentity();
+    if (!identity) return [];
+    return await ctx.db
+      .query("btSearchAlerts")
+      .withIndex("by_clerkId", (q) => q.eq("clerkId", identity.subject))
+      .order("desc")
+      .collect();
+  },
+});
+
+export const removeSearchAlert = mutation({
+  args: { id: v.id("btSearchAlerts") },
+  handler: async (ctx, { id }) => {
+    const identity = await requireUser(ctx);
+    const alert = await ctx.db.get(id);
+    if (!alert) return;
+    if (alert.clerkId !== identity.subject) throw new ConvexError("Recherche non autorisée.");
+    await ctx.db.delete(id);
+  },
+});
+
 export const createMaterial = mutation({
   args: { ...materialFields, status: v.optional(btMaterialStatus), published: v.optional(v.boolean()) },
   handler: async (ctx, args) => {
@@ -188,6 +343,7 @@ export const createMaterial = mutation({
     if (!title) throw new ConvexError("Le titre du matériau est requis.");
     const now = Date.now();
     const { status, published, ...rest } = args;
+    assertPublishable(published ?? false, Math.max(0, Number(args.price) || 0));
 
     const materialId = await ctx.db.insert("btMaterials", {
       ...(normalizeMaterial(rest) as typeof rest),
@@ -200,6 +356,7 @@ export const createMaterial = mutation({
       updatedAt: now,
     });
     if (args.qrReference) await claimQr(ctx, args.qrReference, materialId);
+    await notifySearchAlerts(ctx, materialId);
     return materialId;
   },
 });
@@ -218,6 +375,7 @@ export const updateMaterial = mutation({
     const title = args.title.trim();
     if (!title) throw new ConvexError("Le titre du matériau est requis.");
     const published = args.published ?? existing.published ?? false;
+    assertPublishable(published, Math.max(0, Number(args.price) || 0));
     await ctx.db.patch(id, {
       ...(normalizeMaterial(args) as typeof args),
       title,
@@ -230,6 +388,7 @@ export const updateMaterial = mutation({
     if (args.qrReference && args.qrReference !== existing.qrReference) {
       await claimQr(ctx, args.qrReference, id);
     }
+    await notifySearchAlerts(ctx, id);
   },
 });
 
@@ -238,6 +397,9 @@ export const setMaterialStatus = mutation({
   handler: async (ctx, { id, status }) => {
     await requireCrmPermission(ctx, PAGE_MATERIAUX, "update");
     await ctx.db.patch(id, { status, updatedAt: Date.now() });
+    // Un lot publié en brouillon n'entre en boutique qu'ici : c'est donc aussi
+    // un moment où une recherche peut trouver preneur.
+    await notifySearchAlerts(ctx, id);
   },
 });
 
@@ -247,11 +409,13 @@ export const setMaterialPublished = mutation({
     await requireCrmPermission(ctx, PAGE_MATERIAUX, "update");
     const material = await ctx.db.get(id);
     if (!material) throw new ConvexError("Matériau introuvable.");
+    assertPublishable(published, material.price);
     await ctx.db.patch(id, {
       published,
       publishedAt: published ? material.publishedAt ?? Date.now() : undefined,
       updatedAt: Date.now(),
     });
+    await notifySearchAlerts(ctx, id);
   },
 });
 
@@ -301,6 +465,7 @@ async function publicMaterial(
     unit: material.unit,
     quantity: material.quantity,
     price: material.price,
+    originalPrice: material.originalPrice,
     packaging: material.packaging,
     lengthCm: material.lengthCm,
     widthCm: material.widthCm,
@@ -320,6 +485,11 @@ async function publicMaterial(
     location: material.location,
     qrReference: material.qrReference,
     status: material.status,
+    /** Date d'ouverture à la vente : la boutique en fait ses « bientôt disponible ». */
+    availableFrom: material.availableFrom,
+    availableUntil: material.availableUntil,
+    /** Mise en ligne, pour classer les nouveautés. À défaut, la création. */
+    publishedAt: material.publishedAt ?? material.createdAt,
     photoUrls: photoUrls.filter((url): url is string => Boolean(url)),
   };
 }
@@ -376,6 +546,220 @@ export const listPublicMaterials = query({
   },
 });
 
+/**
+ * Ce qui va avec un matériau, sur un chantier.
+ *
+ * Un client qui regarde un lot de carrelage a besoin de colle et de joints,
+ * pas d'une autre référence de carrelage ; celui qui prend des plaques de
+ * plâtre cherche des rails et de l'enduit. La proximité de catalogue
+ * (sous-famille, famille, catégorie) ne suffit donc pas : on y ajoute des
+ * couples de métier, dans l'ordre où l'artisan les associe.
+ */
+const BT_COMPLEMENTS: Record<string, string[]> = {
+  "Carrelage intérieur": [
+    "Peinture, mastic, droguerie",
+    "Autres revêtements sol et mur",
+    "Plâtre, isolation, plafonds",
+    "Salle de bain, WC, sanitaires",
+  ],
+  "Autres revêtements sol et mur": [
+    "Peinture, mastic, droguerie",
+    "Bois et panneaux",
+    "Carrelage intérieur",
+    "Plâtre, isolation, plafonds",
+  ],
+  "Plâtre, isolation, plafonds": [
+    "Quincaillerie générale de bâtiment",
+    "Peinture, mastic, droguerie",
+    "Bois et panneaux",
+    "Électricité, ventilation",
+  ],
+  "Portes, fenêtres, menuiserie": [
+    "Quincaillerie générale de bâtiment",
+    "Bois et panneaux",
+    "Peinture, mastic, droguerie",
+    "Plâtre, isolation, plafonds",
+  ],
+  "Bois et panneaux": [
+    "Quincaillerie générale de bâtiment",
+    "Portes, fenêtres, menuiserie",
+    "Terrasses et extérieurs",
+    "Peinture, mastic, droguerie",
+  ],
+  Toiture: [
+    "Bois et panneaux",
+    "Plâtre, isolation, plafonds",
+    "Quincaillerie générale de bâtiment",
+    "Matériaux, gros oeuvre",
+  ],
+  "Salle de bain, WC, sanitaires": [
+    "Plomberie",
+    "Carrelage intérieur",
+    "Peinture, mastic, droguerie",
+    "Électricité, ventilation",
+  ],
+  Plomberie: [
+    "Salle de bain, WC, sanitaires",
+    "Quincaillerie générale de bâtiment",
+    "Peinture, mastic, droguerie",
+    "Électricité, ventilation",
+  ],
+  "Électricité, ventilation": [
+    "Plâtre, isolation, plafonds",
+    "Quincaillerie générale de bâtiment",
+    "Matériel de chantier",
+    "Salle de bain, WC, sanitaires",
+  ],
+  "Matériaux, gros oeuvre": [
+    "Matériel de chantier",
+    "Bois et panneaux",
+    "Terrasses et extérieurs",
+    "Toiture",
+  ],
+  "Terrasses et extérieurs": [
+    "Bois et panneaux",
+    "Matériaux, gros oeuvre",
+    "Carrelage intérieur",
+    "Quincaillerie générale de bâtiment",
+  ],
+  "Quincaillerie générale de bâtiment": [
+    "Bois et panneaux",
+    "Portes, fenêtres, menuiserie",
+    "Plâtre, isolation, plafonds",
+    "Toiture",
+  ],
+  "Peinture, mastic, droguerie": [
+    "Plâtre, isolation, plafonds",
+    "Autres revêtements sol et mur",
+    "Carrelage intérieur",
+    "Matériel de chantier",
+  ],
+  "Matériel de chantier": [
+    "Équipement de protection, sécurité",
+    "Matériaux, gros oeuvre",
+    "Peinture, mastic, droguerie",
+    "Bois et panneaux",
+  ],
+  "Équipement de protection, sécurité": [
+    "Matériel de chantier",
+    "Toiture",
+    "Matériaux, gros oeuvre",
+    "Peinture, mastic, droguerie",
+  ],
+};
+
+/** Mots du titre qui ne disent rien de ce qu'est le produit. */
+const TITLE_STOPWORDS = new Set([
+  "de", "du", "des", "le", "la", "les", "un", "une", "et", "en", "au", "aux",
+  "pour", "avec", "sur", "par", "lot", "palette", "sac", "mm", "cm", "ml",
+]);
+
+function titleTokens(value: string): Set<string> {
+  return new Set(
+    value
+      .toLowerCase()
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "")
+      .split(/[^a-z0-9]+/)
+      .filter((token) => token.length > 2 && !TITLE_STOPWORDS.has(token)),
+  );
+}
+
+/**
+ * Note d'affinité entre deux matériaux. Le classement compte plus que la
+ * valeur : ce qui importe est qu'une sous-famille identique passe devant une
+ * catégorie complémentaire, elle-même devant un simple voisin de rayon.
+ */
+function affinityScore(
+  base: Doc<"btMaterials">,
+  other: Doc<"btMaterials">,
+  baseTokens: Set<string>,
+): number {
+  let score = 0;
+  if (base.subcategory && other.subcategory === base.subcategory) score += 6;
+  else if (base.family && other.family === base.family) score += 4;
+  else if (other.category === base.category) score += 3;
+
+  const complements = BT_COMPLEMENTS[base.category] ?? [];
+  const rank = complements.indexOf(other.category);
+  // Les premiers de la liste sont les associations les plus évidentes.
+  if (rank >= 0) score += 3.5 - rank * 0.5;
+
+  const baseMaterials = new Set(
+    [base.material, ...(base.materials ?? [])].filter(Boolean) as string[],
+  );
+  const otherMaterials = [other.material, ...(other.materials ?? [])].filter(Boolean) as string[];
+  if (otherMaterials.some((value) => baseMaterials.has(value))) score += 1.5;
+
+  if (base.brand && other.brand === base.brand) score += 1;
+  if (base.depot && other.depot === base.depot) score += 1;
+  if (base.condition === other.condition) score += 0.25;
+
+  let common = 0;
+  for (const token of titleTokens(other.title)) if (baseTokens.has(token)) common += 1;
+  score += Math.min(common, 3) * 0.5;
+
+  return score;
+}
+
+/**
+ * Suggestions de la fiche produit : ce qui va avec, puis le reste du stock.
+ *
+ * Les deux listes sont calculées ensemble pour ne lire le catalogue qu'une
+ * fois, et « le reste » exclut ce qui est déjà proposé au-dessus — sinon la
+ * page afficherait deux fois les mêmes lots.
+ */
+export const relatedMaterials = query({
+  args: {
+    id: v.id("btMaterials"),
+    relatedLimit: v.optional(v.number()),
+    othersLimit: v.optional(v.number()),
+  },
+  handler: async (ctx, args) => {
+    const base = await ctx.db.get(args.id);
+    if (!base) return { related: [], others: [], remaining: 0 };
+
+    const relatedLimit = Math.min(Math.max(args.relatedLimit ?? 12, 1), 24);
+    const othersLimit = Math.min(Math.max(args.othersLimit ?? 12, 1), 24);
+
+    const published = await ctx.db
+      .query("btMaterials")
+      .withIndex("by_published", (q) => q.eq("published", true))
+      .order("desc")
+      .collect();
+    const candidates = published.filter(
+      (material) =>
+        material._id !== base._id && material.status === "disponible" && material.price > 0,
+    );
+
+    const baseTokens = titleTokens(base.title);
+    const scored = candidates
+      .map((material) => ({ material, score: affinityScore(base, material, baseTokens) }))
+      // En dessous de deux points il ne reste que des coïncidences (même dépôt,
+      // même état) : mieux vaut une section courte qu'une suggestion absurde.
+      .filter((entry) => entry.score >= 2)
+      .sort(
+        (a, b) =>
+          b.score - a.score ||
+          (b.material.publishedAt ?? b.material.createdAt) -
+            (a.material.publishedAt ?? a.material.createdAt),
+      );
+
+    const related = scored.slice(0, relatedLimit).map((entry) => entry.material);
+    const relatedIds = new Set(related.map((material) => String(material._id)));
+    const rest = candidates.filter((material) => !relatedIds.has(String(material._id)));
+
+    return {
+      related: await Promise.all(related.map((material) => publicMaterial(ctx, material))),
+      others: await Promise.all(
+        rest.slice(0, othersLimit).map((material) => publicMaterial(ctx, material)),
+      ),
+      /** Ce que « voir plus » ne montrera pas : renvoie alors au catalogue. */
+      remaining: Math.max(0, rest.length - othersLimit),
+    };
+  },
+});
+
 export const getPublicMaterial = query({
   args: { id: v.id("btMaterials") },
   handler: async (ctx, { id }) => {
@@ -425,6 +809,23 @@ const customerValidator = v.object({
   company: v.optional(v.string()),
 });
 
+const pickupLocationValidator = v.union(
+  v.literal("usine_agile"),
+  v.literal("comptoir_c"),
+  v.literal("recyclerie_pays_de_bray"),
+  v.literal("esspace_150"),
+);
+
+const pickupLocations = {
+  usine_agile: { name: "Usine Agile", address: "31 Rue de l'Industrie, 60000 Beauvais" },
+  comptoir_c: { name: "Comptoir C", address: "13 Av. Pierre Bérégovoy, 60000 Beauvais" },
+  recyclerie_pays_de_bray: {
+    name: "Recyclerie du Pays de Bray",
+    address: "4 Rue de la Prairie, 60650 Lachapelle-aux-Pots",
+  },
+  esspace_150: { name: "Esspace 150", address: "150 Rte de Paris, 76220 Gournay-en-Bray" },
+} as const;
+
 async function nextOrderReference(ctx: { db: { query: (t: "btOrders") => any } }) {
   const all = await ctx.db.query("btOrders").collect();
   return `BT${String(all.length + 1).padStart(5, "0")}`;
@@ -437,6 +838,7 @@ export const createOrder = internalMutation({
     quantity: v.number(),
     customer: customerValidator,
     channel: v.union(v.literal("boutique"), v.literal("terminal")),
+    pickupLocation: v.optional(pickupLocationValidator),
     userId: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
@@ -466,6 +868,7 @@ export const createOrder = internalMutation({
       unitPrice: material.price,
       amountCents,
       customer: { ...args.customer, email: args.customer.email.trim().toLowerCase() },
+      pickupLocation: args.pickupLocation,
       channel: args.channel,
       status: "en_attente",
       userId: args.userId,
@@ -502,6 +905,21 @@ export const markOrderPaid = internalMutation({
     });
 
     const material = await ctx.db.get(order.materialId);
+    // Le reçu part de la mutation qui encaisse : c'est le seul endroit par
+    // lequel passent le paiement en ligne comme l'encaissement au terminal.
+    await ctx.scheduler.runAfter(0, internal.batireEmails.sendOrderReceipt, {
+      to: order.customer.email,
+      firstName: order.customer.firstName,
+      reference: order.reference,
+      title: order.materialTitle,
+      quantity: order.quantity,
+      unit: order.unit,
+      amountCents: order.amountCents,
+      depot: material?.depot,
+      pickupLocation: order.pickupLocation
+        ? pickupLocations[order.pickupLocation]
+        : undefined,
+    });
     if (material) {
       const remaining = Math.max(0, material.quantity - order.quantity);
       await ctx.db.patch(order.materialId, {
@@ -527,6 +945,9 @@ export const startCheckout = action({
     materialId: v.id("btMaterials"),
     quantity: v.number(),
     customer: customerValidator,
+    // Optionnel temporairement pour les pages déjà ouvertes avant la mise à
+    // jour du checkout ; la nouvelle interface l'impose avant le paiement.
+    pickupLocation: v.optional(pickupLocationValidator),
     returnUrl: v.string(),
   },
   handler: async (ctx, args): Promise<{ checkoutUrl: string; orderId: Id<"btOrders"> }> => {
@@ -548,6 +969,7 @@ export const startCheckout = action({
       quantity: args.quantity,
       customer: { ...args.customer, email },
       channel: "boutique",
+      pickupLocation: args.pickupLocation,
       userId: identity?.subject,
     });
 
@@ -1640,15 +2062,17 @@ export function btSubFamilies(category: string, family: string) {
 const UNITS = ["unité", "m²", "m³", "ml", "kg", "tonne", "palette", "sac", "lot"];
 
 /** Provenance du matériau, telle qu'elle se déclare dans un diagnostic PEMD. */
+/** Les trois provenances les plus courantes du dépôt viennent en tête. */
 export const BT_ORIGINS = [
+  "Surplus de chantier",
+  "Dépose préservante",
+  "Déstockage neuf",
   "Reconditionné",
   "Occasion réemploi",
-  "Déstockage neuf",
   "Recyclé upcyclé",
-  "Surplus de chantier",
 ];
 
-/** Type de demandeur : la structure d'où vient le flux de matériaux. */
+/** Type de donateur : qui nous donne les matériaux. */
 export const BT_PROFILES = [
   "Artisans, professionnels du BTP, organisations PRO",
   "Déchèteries publiques",
@@ -1656,6 +2080,7 @@ export const BT_PROFILES = [
   "Maîtres d'ouvrage, architectes, maîtres d'œuvre",
   "Entreprises de recyclage",
   "Recycleries et ressourceries généralistes",
+  "Particulier",
 ];
 
 /** Matières proposées d'origine. L'équipe en ajoute d'autres via `btOptions`. */
@@ -1682,6 +2107,8 @@ export const BT_MATERIALS = [
   "Tissu",
   "Miroir",
   "Pierre",
+  "Terre cuite",
+  "Résine plastique",
 ];
 
 /** Unité dans laquelle sont saisies les dimensions. */
@@ -2177,7 +2604,7 @@ export const sendMessage = mutation({
       clientEmail = previous?.clientEmail ?? "";
     }
 
-    return await ctx.db.insert("btMessages", {
+    const messageId = await ctx.db.insert("btMessages", {
       materialId: args.materialId,
       materialTitle: material?.title ?? "Discussion générale",
       clientId,
@@ -2190,6 +2617,17 @@ export const sendMessage = mutation({
       readByClient: !fromStaff,
       createdAt: Date.now(),
     });
+    // Le client ne surveille pas la messagerie : une réponse de l'équipe le
+    // rejoint par email. Dans l'autre sens, l'équipe voit le fil dans le CRM.
+    if (fromStaff && clientEmail) {
+      await ctx.scheduler.runAfter(0, internal.batireEmails.sendNewMessage, {
+        to: clientEmail,
+        name: clientName,
+        materialTitle: material?.title ?? "votre demande",
+        body,
+      });
+    }
+    return messageId;
   },
 });
 
