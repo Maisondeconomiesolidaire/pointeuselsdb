@@ -50,6 +50,29 @@ export const create = mutation({ args: { title: v.string(), animationType: v.opt
   if (!args.title.trim() || args.endAt <= args.startAt) throw new Error("Renseignez un intitulé et des dates valides.");
   return await ctx.db.insert("recycappCalendarEvents", { ...args, title: args.title.trim(), createdAt: Date.now() });
 } });
+
+/** Modifie l'ensemble des informations d'un évènement existant. */
+export const update = mutation({ args: { id: v.id("recycappCalendarEvents"), title: v.string(), animationType: v.optional(v.string()), structure: v.optional(v.string()), activity: v.optional(v.string()), location: v.optional(v.string()), relatedEvent: v.optional(v.string()), targetAudience: v.optional(v.string()), organizer: v.optional(v.string()), workerIds: v.optional(v.array(v.id("polyvalentWorkers"))), startAt: v.number(), endAt: v.number(), attachments: v.array(v.id("_storage")), urls: v.array(v.string()) }, handler: async (ctx, args) => {
+  await requireCrmPermission(ctx, "calendrier", "update");
+  if (!args.title.trim() || args.endAt <= args.startAt) throw new Error("Renseignez un intitulé et des dates valides.");
+  if (!await ctx.db.get(args.id)) throw new Error("Évènement introuvable.");
+  const text = (value?: string) => value?.trim() || undefined;
+  await ctx.db.patch(args.id, {
+    title: args.title.trim(),
+    animationType: text(args.animationType),
+    structure: text(args.structure),
+    activity: text(args.activity),
+    location: text(args.location),
+    relatedEvent: text(args.relatedEvent),
+    targetAudience: text(args.targetAudience),
+    organizer: text(args.organizer),
+    workerIds: args.workerIds?.length ? args.workerIds : undefined,
+    startAt: args.startAt,
+    endAt: args.endAt,
+    attachments: args.attachments,
+    urls: args.urls.map((url) => url.trim()).filter(Boolean),
+  });
+} });
 /**
  * Équipe attribuable à un évènement : salariés actifs, avec leur durée
  * hebdomadaire. Lisible avec la seule permission « calendrier » — la page
@@ -57,6 +80,15 @@ export const create = mutation({ args: { title: v.string(), animationType: v.opt
  */
 export const assignableWorkers = query({ args: {}, handler: async (ctx) => {
   await requireCrmPermission(ctx, "calendrier", "read");
+  return await assignableWorkerList(ctx);
+} });
+
+/**
+ * Équipe attribuable, sans contrôle de permission : l'appelant fait le sien.
+ * Partagée avec l'espace partagé de Mes Outils, qui propose le même champ
+ * « Salariés mobilisés » sous sa propre clé de permission.
+ */
+export async function assignableWorkerList(ctx: QueryCtx) {
   const workers = await ctx.db.query("polyvalentWorkers").take(1000);
   const active = workers.filter((worker) => worker.activeOverride ?? worker.active ?? true);
   const withHours = await Promise.all(active.map(async (worker) => ({
@@ -70,6 +102,18 @@ export const assignableWorkers = query({ args: {}, handler: async (ctx) => {
     weeklyHours: await weeklyHours(ctx, worker),
   })));
   return withHours.sort((a, b) => a.name.localeCompare(b.name, "fr"));
+}
+
+/**
+ * Partage (ou retire) l'évènement dans l'espace partagé de Mes Outils.
+ *
+ * Rien n'est recopié : Mes Outils lit le calendrier Recyclerie. Un évènement
+ * modifié ici l'est donc partout, et il ne peut pas exister deux versions.
+ */
+export const setShared = mutation({ args: { id: v.id("recycappCalendarEvents"), shared: v.boolean() }, handler: async (ctx, args) => {
+  await requireCrmPermission(ctx, "calendrier", "update");
+  if (!await ctx.db.get(args.id)) throw new Error("Évènement introuvable.");
+  await ctx.db.patch(args.id, { sharedInMesOutils: args.shared });
 } });
 
 /** Réattribue l'évènement à une nouvelle liste de salariés. */

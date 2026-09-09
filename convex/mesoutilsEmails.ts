@@ -10,10 +10,9 @@ const BRAND = "#47c667";
 const BRAND_DARK = "#2fa855";
 
 /**
- * L'intendance suit l'ensemble des réservations (véhicules, salles,
- * équipements) : demandes, acceptations, refus et annulations. Elle est donc
- * ajoutée aux listes de responsables et mise en copie cachée des emails
- * envoyés aux demandeurs.
+ * L'intendance suit les demandes, confirmations et annulations de réservation
+ * (véhicules, salles, équipements). Les décisions d'acceptation ou de refus
+ * restent privées et sont envoyées uniquement au demandeur.
  */
 export const INTENDANCE_EMAIL = "intendance@eco-solidaire.fr";
 
@@ -286,13 +285,14 @@ export const sendReservationEmail = internalAction({
         ${button(appLink(myReservationsPath), "Voir mes réservations")}
       `,
     });
+    const recipientOnlyDecision = args.state === "approved" || args.state === "rejected";
     await resendSend(
       args.email,
       `${copy.subject} · ${args.assetName}`,
       html,
       FROM,
       undefined,
-      { bcc: [INTENDANCE_EMAIL] },
+      recipientOnlyDecision ? undefined : { bcc: [INTENDANCE_EMAIL] },
     );
   },
 });
@@ -759,8 +759,15 @@ export const sendFeedbackResolvedEmail = internalAction({
   },
 });
 
-/** Destinataire des créations de maintenance (responsable de la flotte). */
-export const MAINTENANCE_NOTICE_EMAILS = ["f.henry@eco-solidaire.fr"];
+/**
+ * Destinataires des créations de maintenance.
+ *
+ * Vide pour l'instant : Franck Henry, seul destinataire jusqu'ici, ne souhaite
+ * plus être prévenu à chaque maintenance créée. Aucun email n'est donc envoyé
+ * tant que personne n'est ajouté ici — l'information reste consultable dans
+ * Gotravaux.
+ */
+export const MAINTENANCE_NOTICE_EMAILS: string[] = [];
 
 const MAINTENANCE_PRIORITY_LABELS: Record<string, string> = {
   low: "Basse",
@@ -790,6 +797,8 @@ export const sendMaintenanceCreatedEmail = internalAction({
     vehicleImageStorageId: v.optional(v.string()),
   },
   handler: async (_ctx, args) => {
+    // Sans destinataire, inutile de composer l'email ni d'appeler Resend.
+    if (MAINTENANCE_NOTICE_EMAILS.length === 0) return;
     const rows: Array<[string, string]> = [
       ["Véhicule", [args.vehicleName, args.vehiclePlate].filter(Boolean).join(" · ")],
       ["Intervention", args.title],

@@ -14,6 +14,7 @@ import {
   requireUser,
 } from "./lib";
 import { createMesoutilsNotification } from "./mesoutilsNotifications";
+import { assignableWorkerList } from "./recycappCalendar";
 
 const PAGE_KEY = "mesoutils:actualites";
 
@@ -125,21 +126,42 @@ export const createEvent = mutation({
     start: v.optional(v.number()),
     end: v.optional(v.number()),
     images: v.optional(v.array(v.id("_storage"))),
+    // Mêmes champs que le calendrier de la Recyclerie : les deux se lisent
+    // côte à côte dans l'espace partagé.
+    animationType: v.optional(v.string()),
+    structure: v.optional(v.string()),
+    activity: v.optional(v.string()),
+    relatedEvent: v.optional(v.string()),
+    targetAudience: v.optional(v.string()),
+    organizer: v.optional(v.string()),
+    workerIds: v.optional(v.array(v.id("polyvalentWorkers"))),
+    attachments: v.optional(v.array(v.id("_storage"))),
+    urls: v.optional(v.array(v.string())),
   },
   handler: async (ctx, args) => {
     await requireCrmPermission(ctx, PAGE_KEY, "create");
     const identity = await requireUser(ctx);
     if (!args.title.trim()) throw new Error("Titre requis.");
+    const text = (value?: string) => value?.trim() || undefined;
     return await ctx.db.insert("events", {
       authorClerkId: identity.subject,
       authorName: displayName(identity),
       authorImageUrl: pictureUrl(identity),
       title: args.title.trim(),
-      description: args.description?.trim() || undefined,
-      location: args.location?.trim() || undefined,
+      description: text(args.description),
+      location: text(args.location),
       start: args.start,
       end: args.end,
       images: args.images ?? [],
+      animationType: text(args.animationType),
+      structure: text(args.structure),
+      activity: text(args.activity),
+      relatedEvent: text(args.relatedEvent),
+      targetAudience: text(args.targetAudience),
+      organizer: text(args.organizer),
+      workerIds: args.workerIds?.length ? args.workerIds : undefined,
+      attachments: args.attachments?.length ? args.attachments : undefined,
+      urls: args.urls?.length ? args.urls : undefined,
       createdAt: Date.now(),
     });
   },
@@ -587,3 +609,182 @@ export const listStaffDirectory = query({
 async function canManage(ctx: QueryCtx | MutationCtx) {
   return await hasCrmPermission(ctx, PAGE_KEY, "manage");
 }
+
+/* ─── Calendrier de l'espace partagé ──────────────────────────────────────── */
+
+/**
+ * Évènements affichés au calendrier : ceux de Mes Outils, et ceux du calendrier
+ * Recyclerie partagés dans l'espace commun.
+ *
+ * Les évènements Recyclerie ne sont pas recopiés : ils sont lus à la source.
+ * Une correction faite dans Recycapp apparaît donc ici sans rien à
+ * resynchroniser, et il ne peut pas exister deux versions du même évènement.
+ */
+export const calendarEvents = query({
+  args: { from: v.number(), to: v.number() },
+  handler: async (ctx, { from, to }) => {
+    await requireCrmPermission(ctx, PAGE_KEY, "read");
+    const identity = await requireUser(ctx);
+
+    const own = await ctx.db
+      .query("events")
+      .withIndex("by_start", (q) => q.gte("start", from).lte("start", to))
+      .collect();
+    const photos = await livePhotosByClerkId(ctx, own.map((event) => event.authorClerkId));
+    const mesoutils = await Promise.all(
+      own.map(async (event) => ({
+        kind: "mesoutils" as const,
+        id: String(event._id),
+        eventId: event._id,
+        title: event.title,
+        description: event.description,
+        location: event.location,
+        start: event.start!,
+        end: event.end,
+        imageUrls: await resolveImages(ctx, event.images),
+        authorName: event.authorName,
+        authorImageUrl: livePhoto(photos, event.authorClerkId, event.authorImageUrl),
+        animationType: event.animationType,
+        structure: event.structure,
+        activity: event.activity,
+        relatedEvent: event.relatedEvent,
+        targetAudience: event.targetAudience,
+        organizer: event.organizer,
+        urls: event.urls ?? [],
+        attachmentUrls: await resolveImages(ctx, event.attachments ?? []),
+        canManage: event.authorClerkId === identity.subject,
+      })),
+    );
+
+    const shared = await ctx.db
+      .query("recycappCalendarEvents")
+      .withIndex("by_startAt", (q) => q.gte("startAt", from).lte("startAt", to))
+      .collect();
+    const recyclerie = await Promise.all(shared
+      // Absent vaut partagé : tous les évènements du calendrier Recyclerie
+      // figurent dans l'espace partagé tant qu'on ne les en retire pas.
+      .filter((event) => event.sharedInMesOutils !== false)
+      .map(async (event) => ({
+        kind: "recyclerie" as const,
+        id: String(event._id),
+        title: event.title,
+        description: [
+          event.animationType,
+          event.activity,
+          event.targetAudience ? `Public : ${event.targetAudience}` : undefined,
+        ]
+          .filter(Boolean)
+          .join(" · ") || undefined,
+        location: event.location,
+        start: event.startAt,
+        end: event.endAt,
+        imageUrls: [] as string[],
+        authorName: event.structure ?? "Recyclerie",
+        structure: event.structure,
+        animationType: event.animationType,
+        activity: event.activity,
+        relatedEvent: event.relatedEvent,
+        targetAudience: event.targetAudience,
+        organizer: event.organizer,
+        urls: event.urls ?? [],
+        attachmentUrls: (await Promise.all(
+          event.attachments.map((id) => ctx.storage.getUrl(id)),
+        )).filter((url): url is string => Boolean(url)),
+        canManage: false,
+      })));
+
+    return [...mesoutils, ...recyclerie].sort((a, b) => a.start - b.start);
+  },
+});
+
+/** Évènements de Mes Outils sans date : ils n'ont pas de place au calendrier. */
+export const undatedEvents = query({
+  args: {},
+  handler: async (ctx) => {
+    await requireCrmPermission(ctx, PAGE_KEY, "read");
+    const identity = await requireUser(ctx);
+    const events = await ctx.db.query("events").collect();
+    const undated = events.filter((event) => event.start === undefined);
+    const photos = await livePhotosByClerkId(ctx, undated.map((event) => event.authorClerkId));
+    return await Promise.all(
+      undated
+        .sort((a, b) => b.createdAt - a.createdAt)
+        .map(async (event) => ({
+          kind: "mesoutils" as const,
+          id: String(event._id),
+          eventId: event._id,
+          title: event.title,
+          description: event.description,
+          location: event.location,
+          start: undefined,
+          end: undefined,
+          imageUrls: await resolveImages(ctx, event.images),
+          authorName: event.authorName,
+          authorImageUrl: livePhoto(photos, event.authorClerkId, event.authorImageUrl),
+          animationType: event.animationType,
+          structure: event.structure,
+          activity: event.activity,
+          relatedEvent: event.relatedEvent,
+          targetAudience: event.targetAudience,
+          organizer: event.organizer,
+          urls: event.urls ?? [],
+          attachmentUrls: await resolveImages(ctx, event.attachments ?? []),
+          canManage: event.authorClerkId === identity.subject,
+        })),
+    );
+  },
+});
+
+/**
+ * Vocabulaire des listes déroulantes d'un évènement.
+ *
+ * C'est le même que celui du calendrier de la Recyclerie
+ * (`recycappCalendarOptions`) : une option ajoutée d'un côté est proposée de
+ * l'autre, sinon les deux calendriers décriraient les mêmes animations avec
+ * deux vocabulaires différents.
+ */
+export const eventOptions = query({
+  args: {},
+  handler: async (ctx) => {
+    await requireCrmPermission(ctx, PAGE_KEY, "read");
+    const rows = await ctx.db.query("recycappCalendarOptions").collect();
+    return rows.map((row) => ({ field: row.field, label: row.label }));
+  },
+});
+
+export const addEventOption = mutation({
+  args: {
+    field: v.union(
+      v.literal("animationType"),
+      v.literal("structure"),
+      v.literal("activity"),
+      v.literal("targetAudience"),
+    ),
+    label: v.string(),
+  },
+  handler: async (ctx, args) => {
+    await requireCrmPermission(ctx, PAGE_KEY, "create");
+    const label = args.label.trim();
+    if (!label) throw new Error("Renseignez le libellé de l'option.");
+    const existing = await ctx.db
+      .query("recycappCalendarOptions")
+      .withIndex("by_field", (q) => q.eq("field", args.field))
+      .collect();
+    if (existing.some((row) => row.label.toLowerCase() === label.toLowerCase())) return label;
+    await ctx.db.insert("recycappCalendarOptions", {
+      field: args.field,
+      label,
+      createdAt: Date.now(),
+    });
+    return label;
+  },
+});
+
+/** Équipe mobilisable sur un évènement, sous la permission de l'espace partagé. */
+export const eventWorkers = query({
+  args: {},
+  handler: async (ctx) => {
+    await requireCrmPermission(ctx, PAGE_KEY, "read");
+    return await assignableWorkerList(ctx);
+  },
+});
