@@ -41,7 +41,7 @@ import { Depenses } from "./pages/Depenses";
 import { Factures } from "./pages/Factures";
 import { UpdateAvailableBanner } from "./components/UpdateAvailableBanner";
 import { ProfileSync } from "./components/ProfileSync";
-import { AuthSwitch } from "./components/ui/auth-switch";
+import { AuthServiceFallback, AuthSwitch } from "./components/ui/auth-switch";
 
 const NAV = [
   { to: "/", label: "Tableau de bord", icon: LayoutDashboard, end: true, pageKey: "pointeuse:dashboard" },
@@ -381,6 +381,7 @@ export default function App() {
           se constitue pendant la visite déconnectée. */}
       <ProfileSync app="pointeuse" />
       <UpdateAvailableBanner appName="Pointeuse LSDB" />
+      <AuthServiceFallback />
       <SignedIn>
         <AccessGate />
       </SignedIn>
